@@ -1,0 +1,29 @@
+name: ai-service
+version: 1.0.0
+runtime: python
+entrypoint: python -m src.main --sideload
+transport: stdio
+
+capabilities:
+  providers:
+    - id: antigravity
+      models: [gemini-3-pro-low, gemini-3-flash-low, claude-sonnet-4-20250514, claude-3-7-sonnet-20250219]
+      base_url: https://api.antigravity.wiki
+    - id: bailian
+      models: [qwen3-coder-plus]
+      base_url: https://coding.dashscope.aliyuncs.com/v1
+    - id: minimax
+      models: [MiniMax-M2.1]
+    - id: anthropic
+      models: [claude-sonnet-4-20250514, claude-3-7-sonnet-20250219]
+    - id: ollama
+      models: []
+  tools:
+    - name: time
+      description: 获取当前时间
+    - name: echo
+      description: 回显输入文本
+    - name: calculator
+      description: 数学计算器
+  hooks:
+    - chat.params

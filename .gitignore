@@ -1,0 +1,109 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+gateway/gateway
+ai-service/dist/
+
+# Test binaries
+*.test
+*.out
+
+# Go
+go.sum
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+ENV/
+env/
+poetry.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config
+config/config.local.yaml
+*.env
+.env.local
+.env.*.local
+
+# Data
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Logs
+*.log
+logs/
+
+# Generated
+*.pb.go
+*_pb2.py
+*_pb2_grpc.py
+
+# Secrets
+secrets/
+credentials/
+*.pem
+*.key
+
+# ─── 参考源码 (不属于 NGOClaw, 仅本地参考) ───
+aider/
+openclaw/
+gemini-cli/
+cline/
+continue/
+opencode/
+bubbletea/
+DeepResearch/
+deer-flow/
+
+# Build binaries
+gateway/bin/
+ai-service/bin/
+
+# IDE / Agent
+.opencode/
+.claude/
+.gemini/
+
+# Node modules
+node_modules/
+
+# Go workspace
+go.work
+go.work.sum
+gateway/skills/notebooklm/

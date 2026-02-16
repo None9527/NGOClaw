@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package ngoclaw.ai.v1;
+
+option go_package = "github.com/ngoclaw/ngoclaw/gateway/pkg/pb;aiv1";
+
+// 生成请求
+message GenerateRequest {
+  string prompt = 1;
+  string model = 2;
+  string provider = 3;
+  int32 max_tokens = 4;
+  double temperature = 5;
+  double top_p = 6;
+  map<string, string> metadata = 7;
+  // 会话历史
+  repeated ChatMessage history = 8;
+  // 系统提示词
+  string system_instruction = 9;
+}
+
+// 聊天消息
+message ChatMessage {
+  string role = 1;    // user, model, system
+  string content = 2;
+  string name = 3;    // Optional name of the speaker
+}
+
+// 生成响应
+message GenerateResponse {
+  string request_id = 1;
+  string content = 2;
+  string model_used = 3;
+  int32 tokens_used = 4;
+  string finish_reason = 5;
+  map<string, string> metadata = 6;
+}
+
+// 流式响应块
+message GenerateStreamChunk {
+  string request_id = 1;
+  string content = 2;
+  bool is_final = 3;
+}
+
+// 图像生成请求
+message ImageRequest {
+  string prompt = 1;
+  string model = 2;
+  int32 width = 3;
+  int32 height = 4;
+  int32 num_images = 5;
+}
+
+// 图像生成响应
+message ImageResponse {
+  repeated string image_urls = 1;
+  string model_used = 2;
+}
+
+// 技能执行请求
+message SkillRequest {
+  string skill_id = 1;
+  string input = 2;
+  map<string, string> config = 3;
+}
+
+// 技能执行响应
+message SkillResponse {
+  string output = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+// 健康检查请求
+message HealthCheckRequest {}
+
+// 健康检查响应
+message HealthCheckResponse {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  Status status = 1;
+  string version = 2;
+  map<string, bool> providers_status = 3;
+}
+
+// AI Service - 提供 AI 模型调用和技能执行服务
+service AIService {
+  // 生成 AI 响应
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+  // 流式生成 AI 响应
+  rpc GenerateStream(GenerateRequest) returns (stream GenerateStreamChunk);
+  // 生成图像
+  rpc GenerateImage(ImageRequest) returns (ImageResponse);
+  // 执行技能
+  rpc ExecuteSkill(SkillRequest) returns (SkillResponse);
+  // 健康检查
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
