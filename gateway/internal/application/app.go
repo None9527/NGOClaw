@@ -263,7 +263,12 @@ func (app *App) initInfrastructure() error {
 		researchURL = p.BaseURL
 		researchKey = p.APIKey
 		if len(p.Models) > 0 {
-			researchModel = p.Models[0]
+			// Strip provider prefix (e.g. "bailian/qwen3-coder-plus" -> "qwen3-coder-plus")
+			model := p.Models[0]
+			if idx := strings.Index(model, "/"); idx >= 0 {
+				model = model[idx+1:]
+			}
+			researchModel = model
 		}
 	}
 
