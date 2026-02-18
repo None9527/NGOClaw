@@ -1,4 +1,7 @@
-<h1 align="center">🐾 NGOClaw</h1>
+<p align="center">
+  <img src="docs/banner.png" alt="NGOClaw" width="400">
+</p>
+
 
 <p align="center">
   <strong>Autonomous AI Agent Framework</strong> — Pure Go, batteries included<br>
