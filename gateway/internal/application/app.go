@@ -256,14 +256,28 @@ func (app *App) initInfrastructure() error {
 	if subMaxSteps <= 0 {
 		subMaxSteps = 25
 	}
+	// Pick first available provider for research LLM summarization
+	var researchURL, researchKey, researchModel string
+	if len(app.config.Agent.Providers) > 0 {
+		p := app.config.Agent.Providers[0]
+		researchURL = p.BaseURL
+		researchKey = p.APIKey
+		if len(p.Models) > 0 {
+			researchModel = p.Models[0]
+		}
+	}
+
 	toolpkg.RegisterAllTools(toolpkg.ToolLayerDeps{
-		Registry:   app.toolRegistry,
-		Sandbox:    sbx,
-		SkillExec:  nil,
-		PythonEnv:  app.config.PythonEnv,
-		SkillsDir:  systemSkillsDir,
-		Workspace:  app.config.Agent.Workspace,
-		MCPManager: app.mcpManager,
+		Registry:         app.toolRegistry,
+		Sandbox:          sbx,
+		SkillExec:        nil,
+		PythonEnv:        app.config.PythonEnv,
+		SkillsDir:        systemSkillsDir,
+		ResearchLLMURL:   researchURL,
+		ResearchLLMKey:   researchKey,
+		ResearchLLMModel: researchModel,
+		Workspace:        app.config.Agent.Workspace,
+		MCPManager:       app.mcpManager,
 		SubAgent: &toolpkg.SubAgentDeps{
 			LLMClient:    app.llmRouter,
 			ToolExecutor: &toolBridge{registry: app.toolRegistry},

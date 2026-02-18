@@ -25,6 +25,11 @@ type ToolLayerDeps struct {
 	PythonEnv string // conda/venv path for Python-based tools
 	SkillsDir string // ~/.ngoclaw/skills
 
+	// Research LLM (for goal-directed summarization in web_search deep mode)
+	ResearchLLMURL string // OpenAI-compatible API base URL
+	ResearchLLMKey string // API key
+	ResearchLLMModel string // Model name (e.g. qwen-plus)
+
 	// Code Intelligence
 	Workspace string // LSP workspace root
 
@@ -80,7 +85,7 @@ func RegisterAllTools(deps ToolLayerDeps) int {
 
 	// ── 3. Web & Data ──
 	tools = append(tools,
-		NewWebSearchTool(deps.PythonEnv, deps.SkillsDir, deps.Logger),
+		NewWebSearchTool(deps.PythonEnv, deps.SkillsDir, deps.ResearchLLMURL, deps.ResearchLLMKey, deps.ResearchLLMModel, deps.Logger),
 		NewStockAnalysisTool(deps.PythonEnv, deps.SkillsDir, deps.Logger),
 	)
 

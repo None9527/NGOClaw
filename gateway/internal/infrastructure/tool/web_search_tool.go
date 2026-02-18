@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,12 +20,17 @@ type WebSearchTool struct {
 	scriptPath string // research.py 完整路径
 	timeout    time.Duration
 	logger     *zap.Logger
+
+	// LLM config for goal-directed summarization (injected as env vars)
+	llmAPIURL string
+	llmAPIKey string
+	llmModel  string
 }
 
 // NewWebSearchTool 创建搜索工具
 // pythonEnv: conda/venv 根目录 (如 /home/none/miniconda3/envs/claw)
 // skillsDir: skills 目录根 (如 ~/.ngoclaw/skills)
-func NewWebSearchTool(pythonEnv string, skillsDir string, logger *zap.Logger) *WebSearchTool {
+func NewWebSearchTool(pythonEnv string, skillsDir string, llmAPIURL, llmAPIKey, llmModel string, logger *zap.Logger) *WebSearchTool {
 	pythonBin := "python3" // fallback to PATH
 	if pythonEnv != "" {
 		pythonBin = filepath.Join(pythonEnv, "bin", "python3")
@@ -33,8 +39,11 @@ func NewWebSearchTool(pythonEnv string, skillsDir string, logger *zap.Logger) *W
 	return &WebSearchTool{
 		pythonBin:  pythonBin,
 		scriptPath: filepath.Join(skillsDir, "web-research", "research.py"),
-		timeout:    60 * time.Second,
+		timeout:    90 * time.Second, // Increased for LLM summarization
 		logger:     logger,
+		llmAPIURL:  llmAPIURL,
+		llmAPIKey:  llmAPIKey,
+		llmModel:   llmModel,
 	}
 }
 
@@ -46,7 +55,8 @@ func (t *WebSearchTool) Kind() domaintool.Kind { return domaintool.KindSearch }
 
 func (t *WebSearchTool) Description() string {
 	return "Search the web using SearXNG and extract full article content. " +
-		"Returns JSON array of results with titles, URLs, snippets, and optionally full markdown content (deep mode). " +
+		"In deep mode with a goal, uses LLM to extract targeted evidence and summaries from pages. " +
+		"Returns JSON array of results with titles, URLs, snippets, and optionally goal-directed extractions. " +
 		"Supports time filtering: day, week, month, year."
 }
 
@@ -60,8 +70,12 @@ func (t *WebSearchTool) Schema() map[string]interface{} {
 			},
 			"deep": map[string]interface{}{
 				"type":        "boolean",
-				"description": "If true, fetch and extract full content from top results (recommended for complex questions)",
+				"description": "If true, fetch and extract full content from top results. When combined with 'goal', uses LLM for intelligent summarization.",
 				"default":     false,
+			},
+			"goal": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional goal description for deep mode. Tells the LLM what information to extract. Example: 'Find pricing comparison of cloud providers'",
 			},
 			"time_range": map[string]interface{}{
 				"type":        "string",
@@ -91,6 +105,11 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 		cmdArgs = append(cmdArgs, "--deep")
 	}
 
+	goal, _ := args["goal"].(string)
+	if goal != "" {
+		cmdArgs = append(cmdArgs, "--goal", goal)
+	}
+
 	if timeRange, ok := args["time_range"].(string); ok && timeRange != "" {
 		cmdArgs = append(cmdArgs, "--"+timeRange)
 	}
@@ -98,6 +117,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 	t.logger.Info("Executing web search",
 		zap.String("query", query),
 		zap.Bool("deep", deep),
+		zap.String("goal", goal),
 		zap.String("python", t.pythonBin),
 	)
 
@@ -106,6 +126,13 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, t.pythonBin, cmdArgs...)
+
+	// Inject LLM environment variables for Python script
+	cmd.Env = append(os.Environ(),
+		"RESEARCH_LLM_API_URL="+t.llmAPIURL,
+		"RESEARCH_LLM_API_KEY="+t.llmAPIKey,
+		"RESEARCH_LLM_MODEL="+t.llmModel,
+	)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
