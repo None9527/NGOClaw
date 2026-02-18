@@ -59,7 +59,7 @@ type AgentConfig struct {
 	DefaultModel    string        `mapstructure:"default_model"`
 	DefaultProvider string        `mapstructure:"default_provider"`
 	Workspace       string        `mapstructure:"workspace"`
-	MaxIterations   int           `mapstructure:"max_iterations"`
+
 	AskMode         bool          `mapstructure:"ask_mode"`
 	Models          []ModelConfig `mapstructure:"models"`          // 可用模型列表
 	FallbackModels  []string      `mapstructure:"fallback_models"` // 容灾备选模型链
@@ -258,7 +258,7 @@ func Load() (*Config, error) {
 func setDefaults(v *viper.Viper) {
 	// Gateway 默认值
 	v.SetDefault("gateway.host", "0.0.0.0")
-	v.SetDefault("gateway.port", 18789)
+	v.SetDefault("gateway.port", 18790)
 	v.SetDefault("gateway.mode", "local")
 
 
@@ -268,19 +268,20 @@ func setDefaults(v *viper.Viper) {
 
 	// Log 默认值
 	v.SetDefault("log.level", "info")
-	v.SetDefault("log.format", "json")
+	v.SetDefault("log.format", "console")
 
 	// Agent Runtime 默认值
-	v.SetDefault("agent.runtime.tool_timeout", "30s")
-	v.SetDefault("agent.runtime.run_timeout", "5m")
-	v.SetDefault("agent.runtime.sub_agent_timeout", "2m")
-	v.SetDefault("agent.runtime.max_token_budget", 100000)
+	v.SetDefault("agent.runtime.tool_timeout", "60s")
+	v.SetDefault("agent.runtime.run_timeout", "10m")
+	v.SetDefault("agent.runtime.sub_agent_timeout", "3m")
+	v.SetDefault("agent.runtime.sub_agent_max_steps", 25)
+	v.SetDefault("agent.runtime.max_token_budget", 180000)
 	v.SetDefault("agent.runtime.concurrent_tools", true)
 	v.SetDefault("agent.runtime.max_retries", 3)
 	v.SetDefault("agent.runtime.retry_base_wait", "2s")
 
 	// Guardrails 默认值
-	v.SetDefault("agent.guardrails.context_max_tokens", 128000)
+	v.SetDefault("agent.guardrails.context_max_tokens", 180000)
 	v.SetDefault("agent.guardrails.context_warn_ratio", 0.7)
 	v.SetDefault("agent.guardrails.context_hard_ratio", 0.85)
 	v.SetDefault("agent.guardrails.loop_detect_window", 10)

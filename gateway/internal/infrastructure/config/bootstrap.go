@@ -90,6 +90,11 @@ const defaultConfig = `# ══════════════════�
 # Docs: https://github.com/None9527/NGOClaw/blob/main/docs/USER_MANUAL.md
 # ═══════════════════════════════════════════════════════════════
 
+# ─── Python Environment / Python 环境 ────────────────────────
+# Path to conda env or venv root. Required for skills using Python.
+# Conda 环境 / venv 根目录。使用 Python 技能时需要。
+python_env: ""                   # e.g. "/home/user/miniconda3/envs/claw"
+
 # ─── Gateway Server / 网关服务 ────────────────────────────────
 # HTTP API server settings.
 # HTTP API 服务监听地址。
@@ -107,6 +112,7 @@ telegram:
   mode: polling                # polling | webhook
   dm_policy: allowlist         # allowlist | open
   group_policy: allowlist      # allowlist | open
+  group_allow_from: []         # Allowed group IDs / 允许的群组 ID 列表
 
 # ─── Database / 数据库 ───────────────────────────────────────
 # Conversation history storage.
@@ -126,7 +132,8 @@ log:
 agent:
   default_model: ""            # e.g. "openai/gpt-4o" / 格式: "provider/model"
   workspace: ""                # Default workspace dir / 默认工作目录 (空=当前目录)
-  max_iterations: 50           # Max ReAct loop steps / 最大循环步数
+  ask_mode: false              # Require confirmation before tool exec / 执行前确认
+  grpc_port: 50051             # gRPC agent server port / gRPC 服务端口
 
   # ─── LLM Providers / LLM 服务商 ──────────────────────────
   # Add one or more providers. Lower priority = preferred.
@@ -171,15 +178,80 @@ agent:
     context_max_tokens: 180000 # Max context window / 最大上下文窗口
     context_warn_ratio: 0.7    # Warn at 70% usage / 70% 时警告
     context_hard_ratio: 0.85   # Force compaction at 85% / 85% 时强制压缩
-    loop_detect_threshold: 5   # Identical calls threshold / 相同调用阈值
+    loop_detect_window: 10     # Sliding window size / 滑动窗口大小
+    loop_detect_threshold: 5   # Identical calls threshold / 精确重复阈值
+    loop_name_threshold: 8     # Same tool name consecutive threshold / 同工具连续调用阈值
+    cost_guard_enabled: true   # Enable cost protection / 启用成本保护
+
+  # ─── Security / 工具安全策略 ──────────────────────────────
+  # Tool approval policies.
+  # 工具执行审批策略。
+  security:
+    approval_mode: ask_dangerous   # auto | ask_dangerous | ask_all
+    dangerous_tools:               # Tools requiring confirmation / 需确认的工具
+      - bash
+      - write_file
+      - edit_file
+      - apply_patch
+    trusted_tools:                 # Always auto-approved / 始终自动通过
+      - read_file
+      - list_dir
+      - grep_search
+      - web_search
+      - save_memory
+    trusted_commands:              # Shell commands auto-approved / 免确认的命令
+      - ls
+      - cat
+      - head
+      - tail
+      - grep
+      - find
+      - wc
+      - echo
+      - pwd
+      - which
+      - file
+      - stat
+      - git status
+      - git diff
+      - git log
+      - go build
+      - go test
+    approval_timeout: 5m           # Timeout for user confirmation / 确认超时
 
   # ─── Context Compaction / 上下文压缩 ──────────────────────
   # Automatic conversation summarization when context grows large.
   # 上下文过大时自动摘要压缩。
   compaction:
     message_threshold: 30      # Trigger after N messages / N 条消息后触发
+    token_threshold: 30000     # Trigger after N tokens / N tokens 后触发
     keep_recent: 10            # Keep last N messages / 保留最近 N 条
     summary_max_tokens: 1000   # Summary budget / 摘要 Token 上限
+    pre_flush_to_memory: true  # Save key facts before compaction / 压缩前保存关键事实
+
+  # ─── MCP Servers / MCP 外部服务 ───────────────────────────
+  # MCP servers are configured in ~/.ngoclaw/mcp.json (separate file).
+  # MCP 服务在 ~/.ngoclaw/mcp.json 中单独配置。
+  # Use the mcp_manage tool at runtime to add/remove servers.
+  # 运行时可用 mcp_manage 工具动态增删。
+
+  # ─── Model Policies / 模型策略覆盖 ────────────────────────
+  # Per-model behavior overrides. Keys match by substring against model ID.
+  # 按模型 ID 子串匹配的行为覆盖。一般无需修改。
+  # model_policies:
+  #   qwen3:
+  #     thinking_tag_hint: true
+  #   claude:
+  #     prompt_style: "xml"
+
+# ─── Heartbeat / 心跳监控 ────────────────────────────────────
+# Periodic heartbeat check via Telegram.
+# 通过 Telegram 定期心跳检查。
+heartbeat:
+  enabled: false               # Enable heartbeat / 启用心跳
+  file_path: ""                # HEARTBEAT.md path / 心跳文件路径
+  interval: 30                 # Check interval in minutes / 检查间隔（分钟）
+  chat_id: 0                   # Target Telegram chat ID / 目标 TG 会话 ID
 
 # ─── Long-term Memory / 长期记忆 ─────────────────────────────
 # Vector-based memory for cross-conversation recall.
