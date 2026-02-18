@@ -10,10 +10,11 @@ import (
 )
 
 // MediaSender abstracts Telegram media sending capabilities.
-// Implemented by telegram.Adapter (SendPhoto, SendDocument).
+// Implemented by telegram.Adapter (SendPhoto, SendDocument, SendMediaGroup).
 type MediaSender interface {
 	SendPhoto(chatID int64, path string, caption string) error
 	SendDocument(chatID int64, path string, caption string) error
+	SendMediaGroup(chatID int64, photoPaths []string, caption string) error
 }
 
 // chatIDContextKey is a context key for passing chatID to media tools.
@@ -107,6 +108,111 @@ func (t *SendPhotoTool) Execute(ctx context.Context, args map[string]interface{}
 		Metadata: map[string]interface{}{
 			"chat_id": chatID,
 			"path":    path,
+		},
+	}, nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// SendMediaGroupTool — send_media_group
+// ──────────────────────────────────────────────────────────────
+
+// SendMediaGroupTool sends 2-10 photos as a Telegram album (media group).
+type SendMediaGroupTool struct {
+	sender MediaSender
+	logger *zap.Logger
+}
+
+func NewSendMediaGroupTool(sender MediaSender, logger *zap.Logger) *SendMediaGroupTool {
+	return &SendMediaGroupTool{sender: sender, logger: logger}
+}
+
+func (t *SendMediaGroupTool) Name() string        { return "send_media_group" }
+func (t *SendMediaGroupTool) Kind() domaintool.Kind { return domaintool.KindCommunicate }
+func (t *SendMediaGroupTool) Description() string {
+	return `Send multiple photos as a Telegram album (media group). Accepts 2-10 photos.
+Use this when the user wants to see multiple images at once as a grouped album.
+Each photo can be a local file path or HTTP(S) URL.
+The photos will be displayed as a single album in Telegram.`
+}
+
+func (t *SendMediaGroupTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"photos": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+				"minItems":    2,
+				"maxItems":    10,
+				"description": "Array of 2-10 local file paths or HTTP(S) URLs of photos to send as an album",
+			},
+			"caption": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional caption for the album (shown under the first photo, supports Markdown)",
+			},
+		},
+		"required": []string{"photos"},
+	}
+}
+
+func (t *SendMediaGroupTool) Execute(ctx context.Context, args map[string]interface{}) (*domaintool.Result, error) {
+	caption, _ := args["caption"].(string)
+
+	// Parse photos array
+	rawPhotos, ok := args["photos"]
+	if !ok {
+		return &domaintool.Result{Success: false, Error: "photos is required"}, nil
+	}
+
+	var photos []string
+	switch v := rawPhotos.(type) {
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				photos = append(photos, s)
+			}
+		}
+	case []string:
+		photos = v
+	default:
+		return &domaintool.Result{Success: false, Error: "photos must be an array of strings"}, nil
+	}
+
+	if len(photos) < 2 {
+		return &domaintool.Result{Success: false, Error: "media group requires at least 2 photos"}, nil
+	}
+	if len(photos) > 10 {
+		return &domaintool.Result{Success: false, Error: "media group supports at most 10 photos"}, nil
+	}
+
+	chatID := chatIDFromContext(ctx)
+	if chatID == 0 {
+		return &domaintool.Result{
+			Success: false,
+			Error:   "send_media_group is only available in Telegram mode (no chatID in context)",
+		}, nil
+	}
+
+	t.logger.Info("Sending media group via TG",
+		zap.Int64("chat_id", chatID),
+		zap.Int("photo_count", len(photos)),
+	)
+
+	if err := t.sender.SendMediaGroup(chatID, photos, caption); err != nil {
+		return &domaintool.Result{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to send media group: %v", err),
+		}, nil
+	}
+
+	return &domaintool.Result{
+		Output:  fmt.Sprintf("Media group (%d photos) sent successfully to chat %d", len(photos), chatID),
+		Success: true,
+		Metadata: map[string]interface{}{
+			"chat_id":     chatID,
+			"photo_count": len(photos),
 		},
 	}, nil
 }

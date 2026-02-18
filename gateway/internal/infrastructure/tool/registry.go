@@ -118,6 +118,7 @@ func RegisterAllTools(deps ToolLayerDeps) int {
 	if deps.MediaSender != nil {
 		tools = append(tools,
 			NewSendPhotoTool(deps.MediaSender, deps.Logger),
+			NewSendMediaGroupTool(deps.MediaSender, deps.Logger),
 			NewSendDocumentTool(deps.MediaSender, deps.Logger),
 		)
 	}

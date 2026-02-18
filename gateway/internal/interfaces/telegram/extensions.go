@@ -88,6 +88,36 @@ func (a *Adapter) SendPhoto(chatID int64, photoPath string, caption string) erro
 	return err
 }
 
+// SendMediaGroup 发送组图（2-10 张图片作为相册）
+func (a *Adapter) SendMediaGroup(chatID int64, photoPaths []string, caption string) error {
+	if len(photoPaths) < 2 {
+		return fmt.Errorf("media group requires at least 2 photos, got %d", len(photoPaths))
+	}
+	if len(photoPaths) > 10 {
+		return fmt.Errorf("media group supports at most 10 photos, got %d", len(photoPaths))
+	}
+
+	media := make([]interface{}, 0, len(photoPaths))
+	for i, p := range photoPaths {
+		var inputMedia tgbotapi.InputMediaPhoto
+		if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
+			inputMedia = tgbotapi.NewInputMediaPhoto(tgbotapi.FileURL(p))
+		} else {
+			inputMedia = tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(p))
+		}
+		// Only the first photo gets the caption
+		if i == 0 && caption != "" {
+			inputMedia.Caption = caption
+			inputMedia.ParseMode = "Markdown"
+		}
+		media = append(media, inputMedia)
+	}
+
+	cfg := tgbotapi.NewMediaGroup(chatID, media)
+	_, err := a.bot.SendMediaGroup(cfg)
+	return err
+}
+
 // SendDocument 发送文档
 func (a *Adapter) SendDocument(chatID int64, docPath string, caption string) error {
 	file, err := os.Open(docPath)
