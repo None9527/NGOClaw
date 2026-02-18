@@ -60,9 +60,9 @@ func NewUpdatePlanTool(logger *zap.Logger) *UpdatePlanTool {
 func (t *UpdatePlanTool) Name() string         { return "update_plan" }
 func (t *UpdatePlanTool) Kind() domaintool.Kind { return domaintool.KindThink }
 func (t *UpdatePlanTool) Description() string {
-	return "Create or update the execution plan. Use this to track your progress on multi-step tasks. " +
-		"Call with action='create' and steps to create a new plan. " +
-		"Call with action='update', step_id, and status to update a step."
+	return "Create or update the execution plan. " +
+		"Use action='create' with steps to start a new plan; " +
+		"action='update' with step_id and status to mark progress."
 }
 
 func (t *UpdatePlanTool) Schema() map[string]interface{} {

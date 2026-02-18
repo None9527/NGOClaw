@@ -47,6 +47,38 @@ func NewDBConnection(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 	return db, nil
 }
 
+// NewDBConnectionSilent creates a DB connection with silent logging (for CLI mode)
+func NewDBConnectionSilent(cfg *config.DatabaseConfig) (*gorm.DB, error) {
+	var dialector gorm.Dialector
+
+	switch cfg.Type {
+	case "sqlite":
+		dialector = sqlite.Open(cfg.DSN)
+	case "postgres":
+		dialector = postgres.Open(cfg.DSN)
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", cfg.Type)
+	}
+
+	gormConfig := &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+		NowFunc: func() time.Time {
+			return time.Now().UTC()
+		},
+	}
+
+	db, err := gorm.Open(dialector, gormConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	if err := autoMigrate(db); err != nil {
+		return nil, fmt.Errorf("failed to migrate database: %w", err)
+	}
+
+	return db, nil
+}
+
 // autoMigrate 自动迁移数据库结构
 func autoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(

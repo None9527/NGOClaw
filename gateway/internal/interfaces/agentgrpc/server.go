@@ -110,7 +110,7 @@ func (s *Server) ExecuteAgent(ctx context.Context, req *RunAgentRequest, sendEve
 		zap.String("model", req.Model),
 	)
 
-	_, eventCh := s.agentLoop.Run(ctx, req.SystemPrompt, req.Message, nil, nil)
+	_, eventCh := s.agentLoop.Run(ctx, req.SystemPrompt, req.Message, nil, "")
 
 	for event := range eventCh {
 		grpcEvent := convertToGRPCEvent(event)

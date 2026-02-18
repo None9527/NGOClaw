@@ -75,7 +75,7 @@ func (h *AgentHandler) RunAgent(c *gin.Context) {
 	)
 
 	// Run agent loop (returns immediately, streams events)
-	result, eventCh := h.agentLoop.Run(ctx, systemPrompt, req.Message, req.History, nil)
+	result, eventCh := h.agentLoop.Run(ctx, systemPrompt, req.Message, req.History, "")
 
 	// Stream events as SSE
 	flusher, _ := c.Writer.(http.Flusher)
@@ -119,6 +119,7 @@ func (h *AgentHandler) assemblePrompt(req AgentRequest) string {
 	}
 
 	pctx := prompt.PromptContext{
+		Channel:         "api",
 		RegisteredTools: toolNames,
 		ModelName:       req.Model,
 		UserMessage:     req.Message,
@@ -165,10 +166,7 @@ func (h *AgentHandler) convertEvent(event entity.AgentEvent) SSEEvent {
 		return SSEEvent{Event: "tool_result", Data: event.ToolCall}
 	case entity.EventStepDone:
 		return SSEEvent{Event: "step_done", Data: event.StepInfo}
-	case entity.EventPlanPropose:
-		return SSEEvent{Event: "plan_propose", Data: map[string]string{
-			"plan": event.Content,
-		}}
+
 	case entity.EventError:
 		return SSEEvent{Event: "error", Data: map[string]string{
 			"error": event.Error,

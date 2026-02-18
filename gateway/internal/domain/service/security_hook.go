@@ -98,7 +98,7 @@ func (h *SecurityHook) AfterLLMCall(_ context.Context, _ *LLMResponse, _ int)   
 func (h *SecurityHook) OnStateChange(_ AgentState, _ AgentState, _ StateSnapshot)    {}
 func (h *SecurityHook) OnError(_ context.Context, _ error, _ int)                    {}
 func (h *SecurityHook) OnComplete(_ context.Context, _ *AgentResult)                 {}
-func (h *SecurityHook) OnPlanProposed(_ context.Context, _ string)                   {}
+
 
 // SetApprovalFunc sets the approval callback (deferred injection after TG adapter creation).
 func (h *SecurityHook) SetApprovalFunc(fn ApprovalFunc) {

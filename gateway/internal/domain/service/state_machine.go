@@ -13,7 +13,7 @@ type AgentState string
 
 const (
 	StateIdle       AgentState = "idle"        // Waiting for input
-	StatePlanning   AgentState = "planning"    // Plan mode: generating plan, awaiting approval
+
 	StateStreaming   AgentState = "streaming"   // Streaming LLM response
 	StateToolExec   AgentState = "tool_exec"   // Executing a tool call
 	StateCompacting AgentState = "compacting"  // Compacting context (summarizing old messages)
@@ -27,14 +27,7 @@ const (
 // Key = from state, Value = set of allowed target states.
 var validTransitions = map[AgentState]map[AgentState]bool{
 	StateIdle: {
-		StatePlanning: true,
 		StateStreaming: true,
-	},
-	StatePlanning: {
-		StateStreaming: true,
-		StateComplete: true,
-		StateAborted:  true,
-		StateError:    true,
 	},
 	StateStreaming: {
 		StateToolExec:   true,

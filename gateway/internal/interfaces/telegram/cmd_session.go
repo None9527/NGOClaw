@@ -3,7 +3,10 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // registerSessionCommands registers session lifecycle: start, help, new, clear, status, reset, stop, whoami, commands
@@ -67,6 +70,14 @@ func (a *Adapter) registerSessionCommands(registry *CommandRegistry) {
 
 	// /new 命令 - 创建新会话
 	registry.Register("new", func(ctx context.Context, cmd *Command) (*OutgoingMessage, error) {
+		// Session-memory hook (OpenClaw pattern): save old history before clearing
+		if registry.historyClearer != nil {
+			history := registry.historyClearer.GetHistory(cmd.ChatID)
+			if len(history) >= 2 { // At least 1 user + 1 assistant message
+				saveSessionMemory(history, cmd.ChatID)
+			}
+		}
+
 		if registry.sessionManager != nil {
 			if err := registry.sessionManager.CreateSession(cmd.ChatID, cmd.UserID); err != nil {
 				return &OutgoingMessage{
@@ -230,4 +241,51 @@ func (a *Adapter) registerSessionCommands(registry *CommandRegistry) {
 	registry.Alias("id", "whoami")
 	registry.Alias("abort", "stop")
 	registry.Alias("cancel", "stop")
+}
+
+// saveSessionMemory appends conversation history to ~/.ngoclaw/memory/YYYY-MM-DD.md
+// before clearing. Aligned with OpenClaw session-memory hook pattern.
+// This runs synchronously and fast (no LLM call); just a file append.
+func saveSessionMemory(history []HistoryMessage, chatID int64) {
+	now := time.Now()
+	dateStr := now.Format("2006-01-02")
+	timeStr := now.Format("15:04")
+
+	// Determine memory directory
+	homeDir, _ := os.UserHomeDir()
+	memoryDir := filepath.Join(homeDir, ".ngoclaw", "memory")
+	_ = os.MkdirAll(memoryDir, 0755)
+
+	memoryFile := filepath.Join(memoryDir, dateStr+".md")
+
+	// Build entry — take last 15 messages max
+	msgs := history
+	if len(msgs) > 15 {
+		msgs = msgs[len(msgs)-15:]
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n- [%s] [session] Chat %d (%d msgs)\n", timeStr, chatID, len(history)))
+	for _, m := range msgs {
+		prefix := "  👤"
+		if m.Role == "assistant" {
+			prefix = "  🤖"
+		}
+		// Truncate long messages for daily log readability
+		content := strings.TrimSpace(m.Content)
+		if len(content) > 200 {
+			content = content[:200] + "..."
+		}
+		// Replace newlines with spaces for single-line log entries
+		content = strings.ReplaceAll(content, "\n", " ")
+		sb.WriteString(fmt.Sprintf("%s %s\n", prefix, content))
+	}
+
+	// Append to daily log file
+	f, err := os.OpenFile(memoryFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(sb.String())
 }

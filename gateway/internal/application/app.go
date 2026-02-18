@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -17,12 +16,13 @@ import (
 	domaintool "github.com/ngoclaw/ngoclaw/gateway/internal/domain/tool"
 	"github.com/ngoclaw/ngoclaw/gateway/internal/domain/valueobject"
 	"github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/config"
-	grpcClient "github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/grpc"
 	"github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/llm"
+	_ "github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/llm/anthropic" // register anthropic provider factory
+	_ "github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/llm/gemini"    // register gemini provider factory
+	_ "github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/llm/openai"    // register openai provider factory
 	"github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/persistence"
 	"github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/prompt"
 	"github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/sandbox"
-	"github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/sideload"
 	toolpkg "github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/tool"
 	"github.com/ngoclaw/ngoclaw/gateway/internal/interfaces/agentgrpc"
 	httpServer "github.com/ngoclaw/ngoclaw/gateway/internal/interfaces/http"
@@ -50,11 +50,10 @@ type App struct {
 	processMessageUseCase *usecase.ProcessMessageUseCase
 
 	// 基础设施
-	aiClient        *grpcClient.AIClient
 	toolRegistry    domaintool.Registry
 	toolExecutor    *toolpkg.Executor
 	llmRouter       *llm.Router
-	sideloadMgr     *sideload.Manager
+	mcpManager      *toolpkg.MCPManager
 	agentLoop       *service.AgentLoop
 	securityHook    *service.SecurityHook
 	grpcAgentSrv    *agentgrpc.Server
@@ -109,6 +108,41 @@ func NewApp(cfg *config.Config, logger *zap.Logger) (*App, error) {
 	return app, nil
 }
 
+// NewAppCLI creates a lightweight app for CLI mode.
+// Only initializes: DB (silent), Tools, LLM Router, AgentLoop, PromptEngine.
+// Skips: HTTP server, Telegram, gRPC, seed data.
+func NewAppCLI(cfg *config.Config, logger *zap.Logger) (*App, error) {
+	if err := config.Bootstrap(logger); err != nil {
+		logger.Warn("Bootstrap failed (non-fatal)", zap.Error(err))
+	}
+
+	app := &App{
+		config: cfg,
+		logger: logger,
+	}
+
+	// DB with silent logging (no SQL spam)
+	if err := app.initRepositoriesSilent(); err != nil {
+		return nil, fmt.Errorf("failed to init repositories: %w", err)
+	}
+
+	if err := app.initDomainServices(); err != nil {
+		return nil, fmt.Errorf("failed to init domain services: %w", err)
+	}
+
+	if err := app.initInfrastructure(); err != nil {
+		return nil, fmt.Errorf("failed to init infrastructure: %w", err)
+	}
+
+	if err := app.initApplicationServices(); err != nil {
+		return nil, fmt.Errorf("failed to init application services: %w", err)
+	}
+
+	// No initInterfaces (HTTP/TG/gRPC) — CLI doesn't need servers
+	// No seedData — avoid noisy DB writes on every CLI launch
+	return app, nil
+}
+
 // initRepositories 初始化仓储层
 func (app *App) initRepositories() error {
 	app.logger.Info("Initializing repositories")
@@ -124,6 +158,18 @@ func (app *App) initRepositories() error {
 	app.agentRepo = persistence.NewGormAgentRepository(db)
 	app.messageRepo = persistence.NewGormMessageRepository(db)
 
+	return nil
+}
+
+// initRepositoriesSilent initializes repos with silent DB logging (for CLI mode)
+func (app *App) initRepositoriesSilent() error {
+	db, err := persistence.NewDBConnectionSilent(&app.config.Database)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	app.db = db
+	app.agentRepo = persistence.NewGormAgentRepository(db)
+	app.messageRepo = persistence.NewGormMessageRepository(db)
 	return nil
 }
 
@@ -143,19 +189,6 @@ func (app *App) initDomainServices() error {
 // initInfrastructure 初始化基础设施
 func (app *App) initInfrastructure() error {
 	app.logger.Info("Initializing infrastructure")
-
-	// AI服务客户端 (gRPC to Python AI-Service)
-	var err error
-	app.aiClient, err = grpcClient.NewAIClient(
-		app.config.AIService.Host,
-		app.config.AIService.Port,
-		app.logger,
-	)
-	if err != nil {
-		app.logger.Warn("Failed to connect to AI service, will retry later",
-			zap.Error(err),
-		)
-	}
 
 	// Tool Registry + Executor
 	app.toolRegistry = domaintool.NewInMemoryRegistry()
@@ -180,65 +213,67 @@ func (app *App) initInfrastructure() error {
 		app.logger.Warn("Sandbox init failed, tools will run unsandboxed", zap.Error(sbxErr))
 	}
 
+	// Executor (只负责执行，不再负责注册)
 	app.toolExecutor = toolpkg.NewExecutor(
 		app.toolRegistry,
 		&domaintool.Policy{Profile: "full"},
 		sbx, nil, app.logger,
-		app.config.PythonEnv,
-		systemSkillsDir, // primary skills dir (executor takes one dir, skills auto-discovery handles both)
-	)
-	if err := app.toolExecutor.RegisterBuiltinTools(); err != nil {
-		app.logger.Warn("Some builtin tools failed to register", zap.Error(err))
-	}
-
-	// Register aider-level code intelligence tools
-	repoMap := toolpkg.NewRepoMapTool(app.logger)
-	if err := app.toolRegistry.Register(repoMap); err != nil {
-		app.logger.Warn("Failed to register tool", zap.String("tool", "repo_map"), zap.Error(err))
-	}
-	if sbx != nil {
-		gitTool := toolpkg.NewGitTool(sbx, app.logger)
-		lintFix := toolpkg.NewLintFixTool(sbx, app.logger)
-		if err := app.toolRegistry.Register(gitTool); err != nil {
-			app.logger.Warn("Failed to register tool", zap.String("tool", "git"), zap.Error(err))
-		}
-		if err := app.toolRegistry.Register(lintFix); err != nil {
-			app.logger.Warn("Failed to register tool", zap.String("tool", "lint_fix"), zap.Error(err))
-		}
-	}
-
-	// LSP code intelligence (definition, references, hover, diagnostics, symbols, completion)
-	lspWorkspace := app.config.Agent.Workspace
-	if lspWorkspace == "" {
-		lspWorkspace, _ = os.Getwd()
-	}
-	lspTool := toolpkg.NewLSPTool(lspWorkspace, app.logger)
-	if err := app.toolRegistry.Register(lspTool); err != nil {
-		app.logger.Warn("Failed to register tool", zap.String("tool", "lsp"), zap.Error(err))
-	}
-
-	app.logger.Info("Tool system initialized",
-		zap.Int("tools_registered", len(app.toolRegistry.List())),
 	)
 
-	// LLM Router (Go-native providers with failover)
+	// LLM Router (modular provider factory with failover)
+	// NOTE: must be initialized BEFORE RegisterAllTools because sub_agent depends on it.
 	app.llmRouter = llm.NewRouter(app.logger)
 	for _, p := range app.config.Agent.Providers {
-		builtin := llm.NewOpenAIBuiltinProvider(llm.ProviderConfig{
+		provider, err := llm.CreateProvider(llm.ProviderConfig{
 			Name:     p.Name,
+			Type:     p.Type,
 			BaseURL:  p.BaseURL,
 			APIKey:   p.APIKey,
 			Models:   p.Models,
 			Priority: p.Priority,
 		}, app.logger)
-		app.llmRouter.AddProvider(builtin)
+		if err != nil {
+			app.logger.Error("Failed to create LLM provider",
+				zap.String("name", p.Name),
+				zap.String("type", p.Type),
+				zap.Error(err),
+			)
+			continue
+		}
+		app.llmRouter.AddProvider(provider)
 	}
 	app.logger.Info("LLM Router initialized",
 		zap.Int("providers", len(app.config.Agent.Providers)),
 	)
 
-	// Sideload Manager (discover and load external modules)
-	app.sideloadMgr = sideload.NewManager(app.toolRegistry, app.logger)
+	// MCP Manager (hot-pluggable, reads ~/.ngoclaw/mcp.json)
+	homeDir, _ = os.UserHomeDir()
+	mcpConfigPath := filepath.Join(homeDir, ".ngoclaw", "mcp.json")
+	app.mcpManager = toolpkg.NewMCPManager(mcpConfigPath, app.toolRegistry, app.logger)
+
+	// ── Unified Tool Registration (single entry point) ──
+	subMaxSteps := app.config.Agent.Runtime.SubAgentMaxSteps
+	if subMaxSteps <= 0 {
+		subMaxSteps = 25
+	}
+	toolpkg.RegisterAllTools(toolpkg.ToolLayerDeps{
+		Registry:   app.toolRegistry,
+		Sandbox:    sbx,
+		SkillExec:  nil,
+		PythonEnv:  app.config.PythonEnv,
+		SkillsDir:  systemSkillsDir,
+		Workspace:  app.config.Agent.Workspace,
+		MCPManager: app.mcpManager,
+		SubAgent: &toolpkg.SubAgentDeps{
+			LLMClient:    app.llmRouter,
+			ToolExecutor: &toolBridge{registry: app.toolRegistry},
+			DefaultModel: app.config.Agent.DefaultModel,
+			MaxSteps:     subMaxSteps,
+			Timeout:      app.config.Agent.Runtime.SubAgentTimeout,
+		},
+		Logger: app.logger,
+	})
+
 
 	// Prompt Engine (hot-pluggable system prompt assembly — System + Workspace layers)
 	app.promptEngine = prompt.NewPromptEngine(app.config.Agent.Workspace, app.logger)
@@ -255,61 +290,17 @@ func (app *App) initInfrastructure() error {
 func (app *App) initApplicationServices() error {
 	app.logger.Info("Initializing application services")
 
-	// 消息处理用例 (legacy: routes through gRPC AI-Service)
+	// ProcessMessageUseCase (legacy HTTP/REPL path — uses llmRouter directly)
 	app.processMessageUseCase = usecase.NewProcessMessageUseCase(
 		app.messageRepo,
 		app.messageRouter,
-		app.aiClient,
+		app.llmRouter,
 		app.logger,
 	)
-
-	// 模型容灾 (failover) — 从配置读取 fallback chain
-	if len(app.config.Agent.FallbackModels) > 0 {
-		failover := grpcClient.NewModelFailover(
-			app.config.Agent.FallbackModels,
-			app.logger,
-		)
-		app.processMessageUseCase.SetFailover(failover)
-		app.logger.Info("Model failover enabled",
-			zap.Strings("fallback_chain", app.config.Agent.FallbackModels),
-		)
-	}
 
 	// Agent Loop (ReAct Engine) — uses LLM Router + Tool Bridge
 	loopTools := &toolBridge{registry: app.toolRegistry}
 
-	// Register save_memory tool (structured JSON memory)
-	memTool := toolpkg.NewSaveMemoryTool(app.logger)
-	if err := app.toolRegistry.Register(memTool); err != nil {
-		app.logger.Warn("Failed to register tool", zap.String("tool", "save_memory"), zap.Error(err))
-	}
-	app.logger.Info("Long-term memory tool registered (save_memory → ~/.ngoclaw/memory.json)")
-
-	// Register update_plan tool (Deer-Flow TodoList pattern)
-	planTool := toolpkg.NewUpdatePlanTool(app.logger)
-	if err := app.toolRegistry.Register(planTool); err != nil {
-		app.logger.Warn("Failed to register tool", zap.String("tool", "update_plan"), zap.Error(err))
-	}
-	app.logger.Info("Plan tracking tool registered (update_plan → ~/.ngoclaw/current_plan.json)")
-
-	// Register sub-agent tool (spawn_agent)
-	// Sub-agent defaults from config
-	subMaxSteps := app.config.Agent.Runtime.SubAgentMaxSteps
-	if subMaxSteps <= 0 {
-		subMaxSteps = 25
-	}
-	subAgentTool := toolpkg.NewSubAgentTool(
-		app.llmRouter,
-		loopTools,
-		app.config.Agent.DefaultModel,
-		subMaxSteps,
-		app.config.Agent.Runtime.SubAgentTimeout,
-		app.logger,
-	)
-	if err := app.toolRegistry.Register(subAgentTool); err != nil {
-		app.logger.Warn("Failed to register tool", zap.String("tool", "spawn_agent"), zap.Error(err))
-	}
-	app.logger.Info("Sub-agent tool registered", zap.Int("total_tools", len(app.toolRegistry.List())))
 
 	loopCfg := service.DefaultAgentLoopConfig()
 	loopCfg.Model = app.config.Agent.DefaultModel
@@ -334,6 +325,9 @@ func (app *App) initApplicationServices() error {
 	if app.config.Agent.Guardrails.LoopDetectThreshold > 0 {
 		loopCfg.DoomLoopThreshold = app.config.Agent.Guardrails.LoopDetectThreshold
 	}
+	if app.config.Agent.Guardrails.LoopNameThreshold > 0 {
+		loopCfg.LoopNameThreshold = app.config.Agent.Guardrails.LoopNameThreshold
+	}
 
 	// Retry config from config.yaml
 	if app.config.Agent.Runtime.MaxRetries > 0 {
@@ -351,8 +345,6 @@ func (app *App) initApplicationServices() error {
 		loopCfg.CompactKeepLast = app.config.Agent.Compaction.KeepRecent
 	}
 
-	// Plan vs Act mode from config.yaml (ask_mode: true)
-	loopCfg.PlanMode = app.config.Agent.AskMode
 
 	app.agentLoop = service.NewAgentLoop(
 		app.llmRouter,
@@ -362,7 +354,6 @@ func (app *App) initApplicationServices() error {
 	)
 	app.logger.Info("Agent Loop initialized",
 		zap.String("model", loopCfg.Model),
-		zap.Duration("run_timeout", loopCfg.RunTimeout),
 	)
 
 	// Create SecurityHook and attach to agent loop
@@ -377,7 +368,10 @@ func (app *App) initApplicationServices() error {
 	mwPipeline := service.NewMiddlewarePipeline(app.logger)
 	mwPipeline.Use(
 		service.NewDanglingToolCallMiddleware(app.logger),
-		service.NewMemoryMiddleware(app.llmRouter, &memoryPersisterAdapter{}, app.logger),
+		// NOTE: MemoryMiddleware intentionally removed.
+		// It produced low-quality, unfiltered facts (201 entries in memory.json)
+		// that polluted the system prompt and caused context poisoning.
+		// Future: agent writes memory via file tools (OpenClaw pattern).
 	)
 	app.agentLoop.SetMiddleware(mwPipeline)
 	app.logger.Info("Middleware pipeline configured",
@@ -439,6 +433,11 @@ func (app *App) initInterfaces() error {
 			return fmt.Errorf("failed to create telegram adapter: %w", err)
 		}
 
+		// Register media tools (TG-only, delayed because adapter created here)
+		app.toolRegistry.Register(toolpkg.NewSendPhotoTool(app.telegramAdapter, app.logger))
+		app.toolRegistry.Register(toolpkg.NewSendDocumentTool(app.telegramAdapter, app.logger))
+		app.logger.Info("Registered TG media tools (send_photo, send_document)")
+
 		// 创建会话管理器
 		sessionManager := telegram.NewDefaultSessionManager(app.config.Agent.DefaultModel)
 
@@ -465,7 +464,7 @@ func (app *App) initInterfaces() error {
 		// 创建技能管理器
 		skillHome, _ := os.UserHomeDir()
 		skillDir := filepath.Join(skillHome, ".ngoclaw", "skills")
-		skillManager := telegram.NewSkillManager(skillDir)
+		skillManager := toolpkg.NewSkillManager(skillDir)
 		cmdRegistry.SetSkillManager(skillManager)
 		app.logger.Info("Skill manager initialized", zap.String("dir", skillDir), zap.Int("count", len(skillManager.List())))
 
@@ -560,12 +559,6 @@ func (app *App) seedData() error {
 func (app *App) Start(ctx context.Context) error {
 	app.logger.Info("Starting application")
 
-	// 启动 Sideload (discover + start external modules)
-	if app.sideloadMgr != nil {
-		if err := app.sideloadMgr.DiscoverAndStart(ctx); err != nil {
-			app.logger.Warn("Sideload discovery failed", zap.Error(err))
-		}
-	}
 
 	// 启动HTTP服务器
 	if err := app.httpServer.Start(ctx); err != nil {
@@ -609,17 +602,7 @@ func (app *App) Stop(ctx context.Context) error {
 		app.logger.Error("Failed to stop HTTP server", zap.Error(err))
 	}
 
-	// 停止 Sideload modules
-	if app.sideloadMgr != nil {
-		app.sideloadMgr.StopAll(ctx)
-	}
 
-	// 关闭AI客户端
-	if app.aiClient != nil {
-		if err := app.aiClient.Close(); err != nil {
-			app.logger.Error("Failed to close AI client", zap.Error(err))
-		}
-	}
 
 
 
@@ -650,6 +633,21 @@ func (app *App) Logger() *zap.Logger {
 // Config returns the application config
 func (app *App) AppConfig() *config.Config {
 	return app.config
+}
+
+// AgentLoop returns the agent loop instance (used by CLI/TUI)
+func (app *App) AgentLoop() *service.AgentLoop {
+	return app.agentLoop
+}
+
+// PromptEngine returns the prompt engine (used by CLI/TUI)
+func (app *App) PromptEngine() *prompt.PromptEngine {
+	return app.promptEngine
+}
+
+// ToolRegistry returns the tool registry (used by CLI/TUI)
+func (app *App) ToolRegistry() domaintool.Registry {
+	return app.toolRegistry
 }
 
 // telegramMessageHandler 实现 telegram.MessageHandler + telegram.RunController 接口
@@ -683,7 +681,8 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 
 	// 创建可取消的上下文, 注册到 activeRuns
 	runCtx, runCancel := context.WithCancel(ctx)
-	runCtx = WithChatID(runCtx, msg.ChatID) // 注入 chatID 供 SecurityHook 使用
+	runCtx = WithChatID(runCtx, msg.ChatID)     // for SecurityHook
+	runCtx = toolpkg.WithChatID(runCtx, msg.ChatID) // for media tools (send_photo, send_document)
 	h.activeRuns.Store(msg.ChatID, runCancel)
 	defer func() {
 		runCancel()
@@ -695,8 +694,12 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 
 	// 组装 system prompt (两层架构)
 	toolNames := make([]string, 0)
+	toolSummaries := make(map[string]string)
 	for _, d := range h.toolExec.GetDefinitions() {
 		toolNames = append(toolNames, d.Name)
+		if d.Description != "" {
+			toolSummaries[d.Name] = d.Description
+		}
 	}
 
 	// 获取当前模型名称
@@ -705,24 +708,17 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 		modelName = h.sessionManager.GetCurrentModel(msg.ChatID)
 	}
 
-	// Layer 1: 硬编码基础提示 (身份 + 环境 + 规则, 不可用户覆盖)
-	channelInfo := fmt.Sprintf("Telegram (chat_id: %d, user: @%s)", msg.ChatID, msg.Username)
-	systemPrompt := prompt.BasePrompt(prompt.BasePromptOptions{
-		Channel:   channelInfo,
-		ModelName: modelName,
-	})
-
-	// Layer 2: 用户自定义 (soul.md + 组件 + 变体)
+	// Build unified system prompt (channel-aware assembly)
+	systemPrompt := ""
 	if h.promptEngine != nil {
-		userLayer := h.promptEngine.Assemble(prompt.PromptContext{
+		systemPrompt = h.promptEngine.Assemble(prompt.PromptContext{
+			Channel:         "telegram",
 			RegisteredTools: toolNames,
+			ToolSummaries:   toolSummaries,
 			ModelName:       modelName,
 			UserMessage:     msg.Text,
 			Workspace:       h.workspaceDir,
 		})
-		if userLayer != "" {
-			systemPrompt += "\n\n---\n\n" + userLayer
-		}
 	}
 
 
@@ -730,7 +726,7 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 	history := h.getHistory(msg.ChatID)
 
 	// 运行 agent loop (异步, 通过 eventCh 流式输出)
-	result, eventCh := h.agentLoop.Run(runCtx, systemPrompt, msg.Text, history, nil)
+	result, eventCh := h.agentLoop.Run(runCtx, systemPrompt, msg.Text, history, modelName)
 
 	// 创建 StagedReply: Antigravity 风格的阶段性回复
 	// Phase 1: 状态消息 (思考 → 工具执行 → 步骤进度)
@@ -738,7 +734,7 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 	staged := h.tgAdapter.CreateStagedReply(msg.ChatID)
 	_ = staged.StatusThinking()
 
-	var lastSegment strings.Builder // Text since last tool call (clean output)
+	var lastSegment strings.Builder // Accumulated text from final segment (after last tool result)
 	interrupted := false
 
 	for event := range eventCh {
@@ -753,7 +749,10 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 			lastSegment.WriteString(event.Content)
 
 		case entity.EventToolCall:
-			// New tool call → preceding text was intermediate narration.
+			// Reset lastSegment on each tool call so the fallback only contains text
+			// from the FINAL LLM segment (after the last tool result).
+			// Without this, intermediate narration ("先检查…", "服务正在运行…") from
+			// every LLM step accumulates and contaminates the output.
 			lastSegment.Reset()
 			if event.ToolCall != nil {
 				_ = staged.StatusToolStart(event.ToolCall.Name, event.ToolCall.Arguments)
@@ -788,26 +787,37 @@ func (h *telegramMessageHandler) HandleMessage(ctx context.Context, msg *telegra
 
 	// 正常完成 → 选择最佳输出
 	// Priority: result.FinalContent > lastSegment > "(无输出)"
-	// NOTE: agent_loop now has summary fallback if final step is empty,
-	// so result.FinalContent should rarely be empty after tool execution.
-	finalText := result.FinalContent
+	// NOTE: reasoning tags stripped by agent_loop (StripReasoningTags).
+	// lastSegment fallback also stripped as safety net (OpenClaw pattern).
+	finalText := strings.TrimSpace(result.FinalContent)
 	if finalText == "" {
-		finalText = lastSegment.String()
-	}
-	if finalText == "" {
-		finalText = "(无输出)"
+		finalText = strings.TrimSpace(service.StripReasoningTags(lastSegment.String()))
 	}
 
-	// 清除 <think>...</think> 标签 (reasoning 模型如 MiniMax-M2.1 等)
-	finalText = stripThinkTags(finalText)
+	isEmpty := strings.TrimSpace(finalText) == ""
+	if isEmpty {
+		finalText = "(无输出)"
+	}
 
 	h.logger.Info("[DIAG] Delivering final response to TG",
 		zap.Int64("chat_id", msg.ChatID),
 		zap.Int("content_len", len(finalText)),
 		zap.Int("steps", result.TotalSteps),
+		zap.Bool("empty_fallback", isEmpty),
 	)
 
-	h.appendHistory(msg.ChatID, msg.Text, finalText)
+	// Only append valid responses to history — empty/failed responses pollute context
+	// and cause the model to ignore subsequent user prompts.
+	if !isEmpty {
+		h.appendHistory(msg.ChatID, msg.Text, finalText)
+	} else {
+		h.logger.Warn("[DIAG] Skipping history append for empty response",
+			zap.Int64("chat_id", msg.ChatID),
+			zap.String("raw_final", result.FinalContent),
+			zap.String("raw_segment", lastSegment.String()),
+		)
+	}
+
 	if err := staged.DeliverWithSuffix(h.tgAdapter, finalText, "<i>— NGOClaw</i>"); err != nil {
 		h.logger.Error("[DIAG] TG delivery FAILED", zap.Error(err), zap.Int64("chat_id", msg.ChatID))
 	} else {
@@ -849,6 +859,28 @@ func (h *telegramMessageHandler) ClearHistory(chatID int64) {
 	h.histories.Delete(chatID)
 }
 
+// GetHistory returns conversation history as simplified messages for session-memory saving.
+func (h *telegramMessageHandler) GetHistory(chatID int64) []telegram.HistoryMessage {
+	msgs := h.getHistory(chatID)
+	if len(msgs) == 0 {
+		return nil
+	}
+	result := make([]telegram.HistoryMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "user" || m.Role == "assistant" {
+			content := m.Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			result = append(result, telegram.HistoryMessage{
+				Role:    m.Role,
+				Content: content,
+			})
+		}
+	}
+	return result
+}
+
 // ===== 内部方法 =====
 
 func (h *telegramMessageHandler) getHistory(chatID int64) []service.LLMMessage {
@@ -871,11 +903,3 @@ func (h *telegramMessageHandler) appendHistory(chatID int64, userText, assistant
 	h.histories.Store(chatID, history)
 }
 
-// stripThinkTags removes <think>...</think> blocks from reasoning model output.
-// These tags contain chain-of-thought that should never reach the end user.
-var thinkTagRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
-
-func stripThinkTags(text string) string {
-	cleaned := thinkTagRe.ReplaceAllString(text, "")
-	return strings.TrimSpace(cleaned)
-}

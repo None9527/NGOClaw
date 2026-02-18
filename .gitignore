@@ -5,7 +5,6 @@
 *.so
 *.dylib
 gateway/gateway
-ai-service/dist/
 
 # Test binaries
 *.test
@@ -53,8 +52,7 @@ poetry.lock
 .DS_Store
 Thumbs.db
 
-# Config
-config/config.local.yaml
+# Config (runtime config lives at ~/.ngoclaw/, never in source)
 *.env
 .env.local
 .env.*.local
@@ -70,9 +68,7 @@ data/
 logs/
 
 # Generated
-*.pb.go
-*_pb2.py
-*_pb2_grpc.py
+
 
 # Secrets
 secrets/
@@ -93,7 +89,7 @@ deer-flow/
 
 # Build binaries
 gateway/bin/
-ai-service/bin/
+bin/
 
 # IDE / Agent
 .opencode/
@@ -107,3 +103,8 @@ node_modules/
 go.work
 go.work.sum
 gateway/skills/notebooklm/
+
+# Deprecated / removed
+ai-service/
+doc/
+gateway/skills/

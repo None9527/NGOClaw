@@ -91,11 +91,6 @@ gateway:
   port: 18790
   mode: local
 
-ai_service:
-  host: localhost
-  port: 50051
-  timeout: 120
-
 telegram:
   bot_token: ""
   allow_ids: []

@@ -13,7 +13,6 @@ import (
 // Config 应用配置
 type Config struct {
 	Gateway   GatewayConfig   `mapstructure:"gateway"`
-	AIService AIServiceConfig `mapstructure:"ai_service"`
 	Telegram  TelegramConfig  `mapstructure:"telegram"`
 	Database  DatabaseConfig  `mapstructure:"database"`
 	Log       LogConfig       `mapstructure:"log"`
@@ -30,12 +29,7 @@ type GatewayConfig struct {
 	Mode string `mapstructure:"mode"` // local, production
 }
 
-// AIServiceConfig AI 服务配置
-type AIServiceConfig struct {
-	Host    string `mapstructure:"host"`
-	Port    int    `mapstructure:"port"`
-	Timeout int    `mapstructure:"timeout"` // seconds
-}
+
 
 // TelegramConfig Telegram 配置
 type TelegramConfig struct {
@@ -102,6 +96,7 @@ type ModelPolicyConfig struct {
 // LLMProviderConfig configures a Go-native LLM provider (used by llm.Router)
 type LLMProviderConfig struct {
 	Name     string   `mapstructure:"name"`
+	Type     string   `mapstructure:"type"`     // "openai" (default) | "anthropic" | "gemini"
 	BaseURL  string   `mapstructure:"base_url"`
 	APIKey   string   `mapstructure:"api_key"`
 	Models   []string `mapstructure:"models"`
@@ -134,7 +129,8 @@ type GuardrailsConfig struct {
 	ContextWarnRatio    float64 `mapstructure:"context_warn_ratio"`    // 警告阈值 (0.7 = 70%)
 	ContextHardRatio    float64 `mapstructure:"context_hard_ratio"`    // 强制压缩阈值
 	LoopDetectWindow    int     `mapstructure:"loop_detect_window"`    // 循环检测滑动窗口
-	LoopDetectThreshold int     `mapstructure:"loop_detect_threshold"` // 同一工具连续 N 次视为循环
+	LoopDetectThreshold int     `mapstructure:"loop_detect_threshold"` // 精确匹配重复检测阈值
+	LoopNameThreshold   int     `mapstructure:"loop_name_threshold"`   // 同名 tool 连续调用反思阈值 (default: 8)
 	CostGuardEnabled    bool    `mapstructure:"cost_guard_enabled"`    // 启用成本保护
 }
 
@@ -265,10 +261,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.port", 18789)
 	v.SetDefault("gateway.mode", "local")
 
-	// AI Service 默认值
-	v.SetDefault("ai_service.host", "localhost")
-	v.SetDefault("ai_service.port", 50051)
-	v.SetDefault("ai_service.timeout", 120)
 
 	// Database 默认值
 	v.SetDefault("database.type", "sqlite")

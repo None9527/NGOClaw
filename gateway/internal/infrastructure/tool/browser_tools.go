@@ -9,20 +9,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// SkillExecutor executes skills via gRPC (abstracts AIClient.ExecuteSkill)
+// SkillExecutor executes skills (abstracts browser/external skill backend)
 type SkillExecutor interface {
 	ExecuteSkill(ctx context.Context, skillID string, input string, config map[string]string) (string, error)
 }
 
-// browserTool is a base for all browser tools that delegate to the Python AI Service
+// browserTool is a base for all browser tools that delegate to the SkillExecutor backend
 type browserTool struct {
 	skillExec SkillExecutor
 	logger    *zap.Logger
 }
 
-// executeBrowserSkill sends a browser action to the Python AI Service via ExecuteSkill
+// executeBrowserSkill sends a browser action to the skill executor backend
 func (bt *browserTool) executeBrowserSkill(ctx context.Context, skillID string, params map[string]interface{}) (*Result, error) {
-	// Guard: skill executor not connected (e.g. Python AI Service not running)
+	// Guard: skill executor not connected
 	if bt.skillExec == nil {
 		return &Result{
 			Output:  "Browser tools are unavailable: the browser gRPC service is not connected. Use web_fetch or web_search instead.",
@@ -37,7 +37,7 @@ func (bt *browserTool) executeBrowserSkill(ctx context.Context, skillID string, 
 		return nil, fmt.Errorf("failed to serialize browser params: %w", err)
 	}
 
-	bt.logger.Info("Executing browser skill via gRPC",
+	bt.logger.Info("Executing browser skill",
 		zap.String("skill_id", skillID),
 	)
 
@@ -59,7 +59,7 @@ func (bt *browserTool) executeBrowserSkill(ctx context.Context, skillID string, 
 	}, nil
 }
 
-// BrowserNavigateTool navigates to a URL via Python AI Service
+// BrowserNavigateTool navigates to a URL via skill executor
 type BrowserNavigateTool struct {
 	browserTool
 }

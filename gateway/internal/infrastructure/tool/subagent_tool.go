@@ -45,10 +45,9 @@ func (t *SubAgentTool) Name() string        { return "spawn_agent" }
 func (t *SubAgentTool) Kind() domaintool.Kind { return domaintool.KindExecute }
 
 func (t *SubAgentTool) Description() string {
-	return "Delegate a sub-task to an independent agent that has access to all the same tools. " +
-		"Use this for complex tasks that benefit from focused, isolated execution. " +
-		"The sub-agent runs its own ReAct loop and returns the final result. " +
-		"Example: spawning an agent to audit a codebase, research a topic, or execute a multi-step procedure."
+	return "Delegate a sub-task to an independent agent. " +
+		"The sub-agent has the same tools and runs its own ReAct loop. " +
+		"Use for complex tasks that benefit from focused, isolated execution."
 }
 
 func (t *SubAgentTool) Schema() map[string]interface{} {
@@ -109,13 +108,12 @@ func (t *SubAgentTool) Execute(ctx context.Context, args map[string]interface{})
 		zap.Int("depth", depth+1),
 	)
 
-	// Create sub-agent config (no MaxSteps — bounded by timeout like the main agent)
+	// Create sub-agent config (subagent bounded by context.WithTimeout below)
 	cfg := service.AgentLoopConfig{
 		DoomLoopThreshold: 3,
 		MaxOutputChars:    32000,
 		Temperature:       0.7,
 		Model:             t.defaultModel,
-		RunTimeout:        t.timeout,
 	}
 
 	subAgent := service.NewAgentLoop(t.llm, t.tools, cfg, t.logger.Named("sub-agent"))
@@ -127,7 +125,7 @@ func (t *SubAgentTool) Execute(ctx context.Context, args map[string]interface{})
 	subCtx, cancel := context.WithTimeout(subCtx, t.timeout)
 	defer cancel()
 
-	result, eventCh := subAgent.Run(subCtx, systemPrompt, task, nil, nil)
+	result, eventCh := subAgent.Run(subCtx, systemPrompt, task, nil, "")
 
 	// Drain events (we don't stream them to the parent, just wait for completion)
 	var toolsUsed []string

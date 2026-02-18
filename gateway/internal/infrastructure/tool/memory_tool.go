@@ -67,9 +67,9 @@ func NewSaveMemoryTool(logger *zap.Logger) *SaveMemoryTool {
 func (t *SaveMemoryTool) Name() string         { return "save_memory" }
 func (t *SaveMemoryTool) Kind() domaintool.Kind { return domaintool.KindThink }
 func (t *SaveMemoryTool) Description() string {
-	return "Save an important fact to long-term memory. Use this when you discover user preferences, " +
-		"environment details, project decisions, or corrections that should be remembered across sessions. " +
-		"Facts are stored as structured JSON with category and confidence."
+	return "Save an important fact to long-term memory. " +
+		"Use when you discover user preferences, environment details, project decisions, " +
+		"or corrections that should persist across sessions. Stored as structured JSON."
 }
 
 func (t *SaveMemoryTool) Schema() map[string]interface{} {

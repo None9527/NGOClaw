@@ -23,7 +23,7 @@ type WebSearchTool struct {
 
 // NewWebSearchTool 创建搜索工具
 // pythonEnv: conda/venv 根目录 (如 /home/none/miniconda3/envs/claw)
-// skillsDir: skills 目录根 (如 /home/none/ngoclaw/gateway/skills)
+// skillsDir: skills 目录根 (如 ~/.ngoclaw/skills)
 func NewWebSearchTool(pythonEnv string, skillsDir string, logger *zap.Logger) *WebSearchTool {
 	pythonBin := "python3" // fallback to PATH
 	if pythonEnv != "" {

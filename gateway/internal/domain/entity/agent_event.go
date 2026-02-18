@@ -13,7 +13,6 @@ const (
 	EventStepDone    AgentEventType = "step_done"
 	EventDone        AgentEventType = "done"
 	EventError       AgentEventType = "error"
-	EventPlanPropose AgentEventType = "plan_propose" // Plan vs Act: agent proposes a plan before executing
 )
 
 // AgentEvent represents a single event in the agent's ReAct loop.

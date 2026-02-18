@@ -24,8 +24,6 @@ type AgentHook interface {
 	// AfterToolCall is called after each tool execution completes.
 	AfterToolCall(ctx context.Context, toolName string, output string, success bool)
 
-	// OnPlanProposed is called when plan mode generates a plan.
-	OnPlanProposed(ctx context.Context, plan string)
 
 	// OnError is called when an error occurs in the loop.
 	OnError(ctx context.Context, err error, step int)
@@ -45,7 +43,7 @@ func (NoOpHook) BeforeLLMCall(_ context.Context, _ *LLMRequest, _ int)          
 func (NoOpHook) AfterLLMCall(_ context.Context, _ *LLMResponse, _ int)                          {}
 func (NoOpHook) BeforeToolCall(_ context.Context, _ string, _ map[string]interface{}) bool       { return true }
 func (NoOpHook) AfterToolCall(_ context.Context, _ string, _ string, _ bool)                     {}
-func (NoOpHook) OnPlanProposed(_ context.Context, _ string)                                      {}
+
 func (NoOpHook) OnError(_ context.Context, _ error, _ int)                                       {}
 func (NoOpHook) OnComplete(_ context.Context, _ *AgentResult)                                    {}
 func (NoOpHook) OnStateChange(_, _ AgentState, _ StateSnapshot)                                  {}
@@ -92,11 +90,7 @@ func (c *HookChain) AfterToolCall(ctx context.Context, toolName string, output s
 	}
 }
 
-func (c *HookChain) OnPlanProposed(ctx context.Context, plan string) {
-	for _, h := range c.hooks {
-		h.OnPlanProposed(ctx, plan)
-	}
-}
+
 
 func (c *HookChain) OnError(ctx context.Context, err error, step int) {
 	for _, h := range c.hooks {

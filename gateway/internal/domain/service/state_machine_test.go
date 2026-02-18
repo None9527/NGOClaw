@@ -37,8 +37,8 @@ func TestTransition_ValidPaths(t *testing.T) {
 		path []AgentState
 	}{
 		{
-			name: "idle -> planning -> streaming -> complete",
-			path: []AgentState{StatePlanning, StateStreaming, StateComplete},
+			name: "idle -> streaming -> complete",
+			path: []AgentState{StateStreaming, StateComplete},
 		},
 		{
 			name: "idle -> streaming -> tool_exec -> streaming -> complete",
@@ -57,8 +57,8 @@ func TestTransition_ValidPaths(t *testing.T) {
 			path: []AgentState{StateStreaming, StateError},
 		},
 		{
-			name: "idle -> planning -> aborted",
-			path: []AgentState{StatePlanning, StateAborted},
+			name: "idle -> streaming -> aborted",
+			path: []AgentState{StateStreaming, StateAborted},
 		},
 		{
 			name: "idle -> streaming -> tool_exec -> aborted",
@@ -93,7 +93,7 @@ func TestTransition_InvalidPaths(t *testing.T) {
 		{"idle -> complete", StateIdle, StateComplete},
 		{"idle -> tool_exec", StateIdle, StateToolExec},
 		{"idle -> error", StateIdle, StateError},
-		{"planning -> tool_exec", StatePlanning, StateToolExec},
+
 		{"complete -> idle (terminal)", StateComplete, StateIdle},
 		{"error -> idle (terminal)", StateError, StateIdle},
 		{"aborted -> streaming (terminal)", StateAborted, StateStreaming},
@@ -104,8 +104,6 @@ func TestTransition_InvalidPaths(t *testing.T) {
 			sm := NewStateMachine(10, testLogger())
 			// Navigate to the 'from' state
 			switch tt.from {
-			case StatePlanning:
-				_ = sm.Transition(StatePlanning)
 			case StateStreaming:
 				_ = sm.Transition(StateStreaming)
 			case StateToolExec:
@@ -118,7 +116,7 @@ func TestTransition_InvalidPaths(t *testing.T) {
 				_ = sm.Transition(StateStreaming)
 				_ = sm.Transition(StateError)
 			case StateAborted:
-				_ = sm.Transition(StatePlanning)
+				_ = sm.Transition(StateStreaming)
 				_ = sm.Transition(StateAborted)
 			}
 
@@ -138,7 +136,7 @@ func TestIsTerminal(t *testing.T) {
 		terminal bool
 	}{
 		{StateIdle, false},
-		{StatePlanning, false},
+
 		{StateStreaming, false},
 		{StateToolExec, false},
 		{StateCompacting, false},
@@ -153,8 +151,6 @@ func TestIsTerminal(t *testing.T) {
 			sm := NewStateMachine(10, testLogger())
 			// Navigate to state
 			switch tt.state {
-			case StatePlanning:
-				_ = sm.Transition(StatePlanning)
 			case StateStreaming:
 				_ = sm.Transition(StateStreaming)
 			case StateToolExec:
@@ -173,7 +169,7 @@ func TestIsTerminal(t *testing.T) {
 				_ = sm.Transition(StateStreaming)
 				_ = sm.Transition(StateError)
 			case StateAborted:
-				_ = sm.Transition(StatePlanning)
+				_ = sm.Transition(StateStreaming)
 				_ = sm.Transition(StateAborted)
 			}
 

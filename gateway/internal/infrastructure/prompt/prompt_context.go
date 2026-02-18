@@ -7,8 +7,16 @@ import "strings"
 // simple "which tools exist" — it includes intent detection,
 // token budgeting, and project context.
 type PromptContext struct {
+	// Channel is the communication channel: "cli", "telegram", "api", "grpc".
+	// Used to load channel-specific soul.md and prompts from ~/.ngoclaw/<channel>/.
+	Channel string
+
 	// RegisteredTools lists all currently registered tool names
 	RegisteredTools []string
+
+	// ToolSummaries maps tool name → one-liner description (for system prompt Tooling section).
+	// Populated from tool.Definition.Description at runtime.
+	ToolSummaries map[string]string
 
 	// ModelName is the current LLM model identifier (e.g. "bailian/qwen3-max")
 	ModelName string

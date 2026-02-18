@@ -18,8 +18,6 @@ type Executor struct {
 	skillExec     SkillExecutor
 	logger        *zap.Logger
 	execContext   domaintool.ExecutionContext
-	pythonEnv     string // 全局 Python 环境路径
-	skillsDir     string // 技能脚本目录
 }
 
 // NewExecutor 创建工具执行器
@@ -29,8 +27,6 @@ func NewExecutor(
 	sandbox *sandbox.ProcessSandbox,
 	skillExec SkillExecutor,
 	logger *zap.Logger,
-	pythonEnv string,
-	skillsDir string,
 ) *Executor {
 	return &Executor{
 		registry:    registry,
@@ -39,8 +35,6 @@ func NewExecutor(
 		skillExec:   skillExec,
 		logger:      logger,
 		execContext: domaintool.ExecContextSandbox,
-		pythonEnv:   pythonEnv,
-		skillsDir:   skillsDir,
 	}
 }
 
@@ -157,47 +151,6 @@ func (e *Executor) GetToolDefs() []ToolDef {
 // SetExecutionContext 设置执行上下文
 func (e *Executor) SetExecutionContext(ctx domaintool.ExecutionContext) {
 	e.execContext = ctx
-}
-
-// RegisterBuiltinTools 注册内置工具
-func (e *Executor) RegisterBuiltinTools() error {
-	builtins := []domaintool.Tool{
-		// Core file operations
-		NewBashTool(e.sandbox, e.logger),
-		NewReadFileTool(e.sandbox, e.logger),
-		NewWriteFileTool(e.sandbox, e.logger),
-		NewEditFileTool(e.sandbox, e.logger),
-		NewListDirTool(e.sandbox, e.logger),
-		NewSearchTool(e.sandbox, e.logger),
-		NewGlobTool(e.sandbox, e.logger),
-		// Advanced tools
-		NewApplyPatchTool(e.sandbox, e.logger),
-		NewWebFetchTool(e.sandbox, e.logger),
-		// Web search (SearXNG + deep scraping)
-		NewWebSearchTool(e.pythonEnv, e.skillsDir, e.logger),
-		// Stock analysis
-		NewStockAnalysisTool(e.pythonEnv, e.skillsDir, e.logger),
-		// Browser tools (delegate to Python AI Service via gRPC)
-		NewBrowserNavigateTool(e.skillExec, e.logger),
-		NewBrowserScreenshotTool(e.skillExec, e.logger),
-		NewBrowserClickTool(e.skillExec, e.logger),
-		NewBrowserTypeTool(e.skillExec, e.logger),
-	}
-
-	for _, tool := range builtins {
-		if err := e.registry.Register(tool); err != nil {
-			e.logger.Warn("Failed to register builtin tool",
-				zap.String("tool", tool.Name()),
-				zap.Error(err),
-			)
-		} else {
-			e.logger.Info("Registered builtin tool",
-				zap.String("tool", tool.Name()),
-			)
-		}
-	}
-
-	return nil
 }
 
 // NeedsApproval 检查是否需要用户批准

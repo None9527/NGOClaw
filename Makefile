@@ -1,9 +1,8 @@
-.PHONY: help init build test clean proto docker-build docker-up docker-down
+.PHONY: help build test clean install lint fmt
 
-# Colors for output
+# Colors
 GREEN  := $(shell tput -Txterm setaf 2)
 YELLOW := $(shell tput -Txterm setaf 3)
-WHITE  := $(shell tput -Txterm setaf 7)
 RESET  := $(shell tput -Txterm sgr0)
 
 help: ## Show this help message
@@ -14,80 +13,36 @@ help: ## Show this help message
 	@echo 'Targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  ${YELLOW}%-20s${GREEN}%s${RESET}\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-init: ## Initialize project dependencies
-	@echo "${GREEN}Initializing Go module...${RESET}"
-	cd gateway && go mod download
-	@echo "${GREEN}Initializing Python environment...${RESET}"
-	cd ai-service && python -m venv venv && \
-		. venv/bin/activate && pip install -r requirements.txt
+build: ## Build ngoclaw binary
+	@echo "${GREEN}Building ngoclaw...${RESET}"
+	cd gateway && go build -o bin/ngoclaw ./cmd/cli
+	@echo "${GREEN}Build complete → gateway/bin/ngoclaw${RESET}"
 
-proto: ## Generate gRPC code from proto files
-	@echo "${GREEN}Generating gRPC code...${RESET}"
-	cd shared/proto && \
-		protoc --go_out=../../gateway/pkg/pb --go_opt=paths=source_relative \
-		       --go-grpc_out=../../gateway/pkg/pb --go-grpc_opt=paths=source_relative \
-		       ai_service.proto
-	cd shared/proto && \
-		python3 -m grpc_tools.protoc -I. \
-		       --python_out=../../ai-service/src/generated \
-		       --grpc_python_out=../../ai-service/src/generated \
-		       ai_service.proto
-
-build: proto ## Build all services
-	@echo "${GREEN}Building Gateway service...${RESET}"
-	cd gateway && go build -o gateway ./cmd/gateway
-	@echo "${GREEN}Gateway built successfully${RESET}"
+install: build ## Install ngoclaw to /usr/local/bin
+	@echo "${GREEN}Installing ngoclaw...${RESET}"
+	sudo ln -sf $(shell pwd)/gateway/bin/ngoclaw /usr/local/bin/ngoclaw
+	@echo "${GREEN}Installed: /usr/local/bin/ngoclaw${RESET}"
 
 test: ## Run tests
-	@echo "${GREEN}Running Gateway tests...${RESET}"
+	@echo "${GREEN}Running tests...${RESET}"
+	cd gateway && go test ./...
+
+test-race: ## Run tests with race detector
+	@echo "${GREEN}Running tests with -race...${RESET}"
 	cd gateway && go test -v -race -coverprofile=coverage.out ./...
-	@echo "${GREEN}Running AI Service tests...${RESET}"
-	cd ai-service && . venv/bin/activate && pytest -v
-
-clean: ## Clean build artifacts
-	@echo "${YELLOW}Cleaning build artifacts...${RESET}"
-	rm -f gateway/gateway
-	rm -rf ai-service/dist
-	rm -f gateway/coverage.out
-	rm -rf gateway/pkg/pb
-	rm -rf ai-service/src/generated
-
-docker-build: ## Build Docker images
-	@echo "${GREEN}Building Docker images...${RESET}"
-	docker-compose build
-
-docker-up: ## Start services with Docker Compose
-	@echo "${GREEN}Starting services...${RESET}"
-	docker-compose up -d
-
-docker-down: ## Stop services
-	@echo "${YELLOW}Stopping services...${RESET}"
-	docker-compose down
-
-docker-logs: ## Show service logs
-	docker-compose logs -f
-
-run-gateway: build ## Run Gateway service locally
-	@echo "${GREEN}Starting Gateway service...${RESET}"
-	cd gateway && ./gateway
-
-run-ai-service: ## Run AI Service locally
-	@echo "${GREEN}Starting AI Service...${RESET}"
-	cd ai-service && . venv/bin/activate && python -m src.main
 
 lint: ## Run linters
-	@echo "${GREEN}Linting Go code...${RESET}"
+	@echo "${GREEN}Linting...${RESET}"
 	cd gateway && go vet ./...
 	cd gateway && golangci-lint run || true
-	@echo "${GREEN}Linting Python code...${RESET}"
-	cd ai-service && . venv/bin/activate && \
-		black --check src/ && \
-		ruff check src/
 
 fmt: ## Format code
-	@echo "${GREEN}Formatting Go code...${RESET}"
+	@echo "${GREEN}Formatting...${RESET}"
 	cd gateway && go fmt ./...
-	@echo "${GREEN}Formatting Python code...${RESET}"
-	cd ai-service && . venv/bin/activate && black src/
+
+clean: ## Clean build artifacts
+	@echo "${YELLOW}Cleaning...${RESET}"
+	rm -f gateway/bin/ngoclaw
+	rm -f gateway/coverage.out
 
 .DEFAULT_GOAL := help

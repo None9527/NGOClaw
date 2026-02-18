@@ -13,97 +13,31 @@ import (
 	"go.uber.org/zap"
 )
 
-// ProcessMessageUseCase 处理消息用例
+// ProcessMessageUseCase handles the legacy message-processing flow.
+// The primary path is AgentLoop (ReAct engine); this use-case is the
+// fallback for HTTP API and REPL interfaces that do not use AgentLoop.
 type ProcessMessageUseCase struct {
 	messageRepo repository.MessageRepository
 	router      service.MessageRouter
-	aiClient    AIServiceClient
-	compactor   *Compactor
-	failover    RequestFailover
+	llm         service.LLMClient
 	agentLoop   *service.AgentLoop
 	logger      *zap.Logger
 }
 
-// AIServiceClient AI服务客户端接口
-type AIServiceClient interface {
-	GenerateResponse(ctx context.Context, req *AIRequest) (*AIResponse, error)
-	GenerateStream(ctx context.Context, req *AIRequest) (<-chan *AIStreamChunk, <-chan error)
-	ExecuteSkill(ctx context.Context, req *SkillRequest) (*SkillResponse, error)
-}
-
-// RequestFailover wraps AI requests with model failover logic.
-// Implemented by grpc.ModelFailover.
-type RequestFailover interface {
-	ExecuteWithFailover(ctx context.Context, req *AIRequest, client AIServiceClient) (*AIResponse, error)
-}
-
-// AIRequest AI请求
-type AIRequest struct {
-	Prompt      string
-	Model       string
-	MaxTokens   int
-	Temperature float64
-	History     []*entity.Message
-	Tools       []ToolDefinition // Tool definitions for function calling
-}
-
-// ToolDefinition represents a tool schema for LLM function calling
-type ToolDefinition struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Parameters  map[string]interface{} `json:"parameters"`
-}
-
-// AIResponse AI响应
-type AIResponse struct {
-	Content    string
-	ModelUsed  string
-	TokensUsed int
-	ToolCalls  []entity.ToolCallInfo // Tool calls from the LLM
-}
-
-// AIStreamChunk AI流式响应块
-type AIStreamChunk struct {
-	Content    string
-	IsFinal    bool
-	ModelUsed  string // 模型名称 (由 final chunk 携带)
-	TokensUsed int    // token 用量 (由 final chunk 携带)
-}
-
-
-// SkillRequest 技能执行请求
-type SkillRequest struct {
-	SkillID string
-	Input   string
-	Config  map[string]string
-}
-
-// SkillResponse 技能执行响应
-type SkillResponse struct {
-	Output       string
-	Success      bool
-	ErrorMessage string
-}
-
-// NewProcessMessageUseCase 创建消息处理用例
+// NewProcessMessageUseCase creates a message processing use-case.
+// The llm parameter is the same LLMClient (llmRouter) used by AgentLoop.
 func NewProcessMessageUseCase(
 	messageRepo repository.MessageRepository,
 	router service.MessageRouter,
-	aiClient AIServiceClient,
+	llm service.LLMClient,
 	logger *zap.Logger,
 ) *ProcessMessageUseCase {
 	return &ProcessMessageUseCase{
 		messageRepo: messageRepo,
 		router:      router,
-		aiClient:    aiClient,
-		compactor:   NewCompactor(aiClient, logger),
+		llm:         llm,
 		logger:      logger,
 	}
-}
-
-// SetFailover sets an optional model failover handler
-func (uc *ProcessMessageUseCase) SetFailover(f RequestFailover) {
-	uc.failover = f
 }
 
 // SetAgentLoop sets the ReAct agent loop for tool-calling conversations
@@ -111,15 +45,15 @@ func (uc *ProcessMessageUseCase) SetAgentLoop(loop *service.AgentLoop) {
 	uc.agentLoop = loop
 }
 
-// Execute 执行消息处理
+// Execute processes a user message and generates an AI response.
 func (uc *ProcessMessageUseCase) Execute(ctx context.Context, message *entity.Message) (*entity.Message, error) {
-	// 1. 保存用户消息
+	// 1. Save user message
 	if err := uc.messageRepo.Save(ctx, message); err != nil {
 		uc.logger.Error("Failed to save message", zap.Error(err))
 		return nil, err
 	}
 
-	// 2. 路由到合适的代理
+	// 2. Route to agent
 	agent, err := uc.router.Route(ctx, message)
 	if err != nil {
 		uc.logger.Error("Failed to route message", zap.Error(err))
@@ -131,155 +65,68 @@ func (uc *ProcessMessageUseCase) Execute(ctx context.Context, message *entity.Me
 		zap.String("agent_name", agent.Name()),
 	)
 
-	// Check for commands
-	text := message.Content().Text()
-	if strings.HasPrefix(text, "/skill ") {
-		args := strings.TrimSpace(strings.TrimPrefix(text, "/skill "))
-		if args != "" {
-			parts := strings.SplitN(args, " ", 2)
-			skillID := parts[0]
-			input := ""
-			if len(parts) > 1 {
-				input = parts[1]
-			}
-			return uc.handleSkillExecution(ctx, message, agent, skillID, input)
-		}
-	}
-
-	// 3. 获取历史消息
-	// 获取最近的50条消息作为上下文
+	// 3. Get conversation history
 	history, err := uc.messageRepo.FindByConversationID(ctx, message.ConversationID(), 50, 0)
 	if err != nil {
 		uc.logger.Warn("Failed to retrieve conversation history", zap.Error(err))
 		history = []*entity.Message{}
 	}
 
-	// 3.5 Get model config for compaction and AI request
+	// 4. Build LLM request
 	modelConfig := agent.ModelConfig()
 
-	// 3.5 Auto-compact if history is too long
-	var compactSummary string
-	if uc.compactor != nil && len(history) > 0 {
-		compactResult, compactErr := uc.compactor.CompactIfNeeded(ctx, history, modelConfig.FullModelName())
-		if compactErr == nil && compactResult.WasCompacted {
-			history = compactResult.RecentMessages
-			compactSummary = compactResult.Summary
-		}
-	}
-
-	// 4. 构建AI请求
-
-	// 从历史中过滤掉当前消息
-	var contextHistory []*entity.Message
+	// Convert entity messages to LLMMessages
+	var llmHistory []service.LLMMessage
 	for _, msg := range history {
 		if msg.ID() == message.ID() {
 			continue
 		}
-		if msg.Content().IsTextOnly() {
-			contextHistory = append(contextHistory, msg)
+		if !msg.Content().IsTextOnly() {
+			continue
 		}
+		role := "user"
+		if msg.IsFromBot() {
+			role = "assistant"
+		}
+		llmHistory = append(llmHistory, service.LLMMessage{
+			Role:    role,
+			Content: msg.Content().Text(),
+		})
 	}
 
-	// Build prompt with optional compaction summary
-	promptText := message.Content().Text()
-	if compactSummary != "" {
-		promptText = fmt.Sprintf("[Previous conversation summary: %s]\n\n%s", compactSummary, promptText)
-	}
+	// Add the current user message
+	llmHistory = append(llmHistory, service.LLMMessage{
+		Role:    "user",
+		Content: message.Content().Text(),
+	})
 
-	aiReq := &AIRequest{
-		Prompt:      promptText,
+	llmReq := &service.LLMRequest{
+		Messages:    llmHistory,
 		Model:       modelConfig.FullModelName(),
 		MaxTokens:   modelConfig.MaxTokens(),
 		Temperature: modelConfig.Temperature(),
-		History:     contextHistory,
 	}
 
-	// 5. 调用AI服务
-	aiResp := &AIResponse{}
-	var aiErr error
-
-	if modelConfig.Stream() {
-		// 流式生成
-		streamChan, errChan := uc.aiClient.GenerateStream(ctx, aiReq)
-		var contentBuilder strings.Builder
-		modelUsed := ""
-		tokensUsed := 0
-
-		for {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case chunk, ok := <-streamChan:
-				if !ok {
-					streamChan = nil // Mark channel as closed
-					break
-				}
-				contentBuilder.WriteString(chunk.Content)
-				// Extract model and token info from final chunk
-				if chunk.ModelUsed != "" {
-					modelUsed = chunk.ModelUsed
-				}
-				if chunk.TokensUsed > 0 {
-					tokensUsed = chunk.TokensUsed
-				}
-				if chunk.IsFinal {
-					break
-				}
-			case streamErr, ok := <-errChan:
-				if ok {
-					aiErr = streamErr
-				}
-				errChan = nil // Mark channel as closed
-				break
-			}
-
-			if streamChan == nil && errChan == nil {
-				break
-			}
-		}
-
-		if aiErr != nil {
-			uc.logger.Error("Failed to generate AI stream response", zap.Error(aiErr))
-			return nil, aiErr
-		}
-
-		aiResp.Content = contentBuilder.String()
-		if modelUsed == "" {
-			modelUsed = aiReq.Model // Fallback to request model
-		}
-		aiResp.ModelUsed = modelUsed
-		aiResp.TokensUsed = tokensUsed
-
-	} else {
-		// 非流式生成 — with optional failover
-		if uc.failover != nil {
-			aiResp, aiErr = uc.failover.ExecuteWithFailover(ctx, aiReq, uc.aiClient)
-		} else {
-			aiResp, aiErr = uc.aiClient.GenerateResponse(ctx, aiReq)
-		}
-		if aiErr != nil {
-			uc.logger.Error("Failed to generate AI response", zap.Error(aiErr))
-			return nil, aiErr
-		}
+	// 5. Call LLM via llmRouter (same path as AgentLoop)
+	llmResp, err := uc.llm.Generate(ctx, llmReq)
+	if err != nil {
+		uc.logger.Error("Failed to generate AI response", zap.Error(err))
+		return nil, err
 	}
 
-	// 6. 创建响应消息
-	// 构建Bot用户
+	// 6. Build response message
 	botUser := valueobject.NewUser(
 		agent.ID(),
 		agent.Name(),
 		"bot",
 	)
 
-	// 构建消息内容
 	content := valueobject.NewMessageContent(
-		aiResp.Content,
+		llmResp.Content,
 		valueobject.ContentTypeText,
 	)
 
-	// 生成消息ID (简单实现)
 	respID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
-
 	responseMsg, err := entity.NewMessage(
 		respID,
 		message.ConversationID(),
@@ -291,10 +138,10 @@ func (uc *ProcessMessageUseCase) Execute(ctx context.Context, message *entity.Me
 		return nil, err
 	}
 
-	responseMsg.SetMetadata("model_used", aiResp.ModelUsed)
-	responseMsg.SetMetadata("tokens_used", aiResp.TokensUsed)
+	responseMsg.SetMetadata("model_used", llmResp.ModelUsed)
+	responseMsg.SetMetadata("tokens_used", llmResp.TokensUsed)
 
-	// 7. 保存响应消息
+	// 7. Save response
 	if err := uc.messageRepo.Save(ctx, responseMsg); err != nil {
 		uc.logger.Error("Failed to save response message", zap.Error(err))
 		return nil, err
@@ -302,51 +149,14 @@ func (uc *ProcessMessageUseCase) Execute(ctx context.Context, message *entity.Me
 
 	uc.logger.Info("AI response generated and saved",
 		zap.String("message_id", responseMsg.ID()),
-		zap.String("model", aiResp.ModelUsed),
-		zap.Int("tokens", aiResp.TokensUsed),
+		zap.String("model", llmResp.ModelUsed),
+		zap.Int("tokens", llmResp.TokensUsed),
 	)
 
 	return responseMsg, nil
 }
 
-
-func (uc *ProcessMessageUseCase) handleSkillExecution(
-	ctx context.Context,
-	originalMsg *entity.Message,
-	agent *entity.Agent,
-	skillID string,
-	input string,
-) (*entity.Message, error) {
-	uc.logger.Info("Handling skill execution", zap.String("skill_id", skillID))
-
-	req := &SkillRequest{
-		SkillID: skillID,
-		Input:   input,
-	}
-
-	resp, err := uc.aiClient.ExecuteSkill(ctx, req)
-	if err != nil {
-		uc.logger.Error("Failed to execute skill", zap.Error(err))
-		return uc.createErrorMessage(ctx, originalMsg, agent, "Failed to execute skill: "+err.Error())
-	}
-
-	responseText := resp.Output
-	if !resp.Success {
-		responseText = fmt.Sprintf("Skill execution failed: %s", resp.ErrorMessage)
-	}
-
-	content := valueobject.NewMessageContent(
-		responseText,
-		valueobject.ContentTypeText,
-	)
-
-	return uc.saveResponse(ctx, originalMsg, agent, content, map[string]interface{}{
-		"skill_id": skillID,
-		"success":  resp.Success,
-		"type":     "skill_execution",
-	})
-}
-
+// createErrorMessage creates an error response message
 func (uc *ProcessMessageUseCase) createErrorMessage(
 	ctx context.Context,
 	originalMsg *entity.Message,
@@ -393,4 +203,21 @@ func (uc *ProcessMessageUseCase) saveResponse(
 	}
 
 	return responseMsg, nil
+}
+
+// Helper: build history string for compaction (used by domain compactor, kept here for reference)
+func buildHistoryText(messages []*entity.Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		role := "User"
+		if msg.Sender().Type() == "bot" {
+			role = "Assistant"
+		}
+		text := msg.Content().Text()
+		if len(text) > 500 {
+			text = text[:500] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, text))
+	}
+	return sb.String()
 }

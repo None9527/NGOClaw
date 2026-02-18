@@ -32,26 +32,24 @@ type AgentLoopConfig struct {
 	CompactThreshold int // Deprecated: use ContextGuard for token-based compaction
 	CompactKeepLast  int // Number of recent messages to preserve during compaction (default: 10)
 
-	// Plan vs Act mode — LLM proposes a plan before executing tool calls
-	PlanMode bool // When true, first turn forces planning; execution pauses until approval
-
 	// Parallel tool execution
 	MaxParallelTools int // Max concurrent tool executions (default: 4, 1 = sequential)
 
-	// Guardrails (backported from EmbeddedRunner)
+	// Guardrails — OpenClaw/Continue aligned: token budget is the only natural limit.
+	// No MaxSteps, no RunTimeout. Loop runs until LLM stops calling tools or tokens exhaust.
 	MaxTokenBudget      int64         // Token budget limit (0 = disabled)
-	RunTimeout          time.Duration // Max duration per Run (0 = disabled, default 10m)
 	ToolTimeout         time.Duration // Per-tool execution timeout (default 30s)
 	ContextMaxTokens    int           // Context window token limit (default 128000)
 	ContextWarnRatio    float64       // Warn when context > this ratio (default 0.7)
 	ContextHardRatio    float64       // Force compact when > this ratio (default 0.85)
-	LoopWindowSize      int           // Sliding window size for loop detection (default 10)
-	LoopDetectThreshold int           // Identical calls in window to trigger loop alarm (default 5)
+	LoopWindowSize      int           // Sliding window size for exact-match loop detection (default 10)
+	LoopDetectThreshold int           // Identical calls in window to trigger reflection (default 5)
+	LoopNameThreshold   int           // Same tool name consecutive calls to trigger reflection (default 8)
 }
 
 // DefaultAgentLoopConfig returns production-ready defaults.
-// Note: no MaxSteps — the loop runs until the model stops calling tools,
-// guarded by RunTimeout + LoopDetector + ContextGuard (matching OpenClaw/Gemini CLI patterns).
+// OpenClaw/Continue aligned: no MaxSteps, no RunTimeout.
+// Loop runs until LLM stops calling tools, guarded by token budget + ContextGuard.
 func DefaultAgentLoopConfig() AgentLoopConfig {
 	return AgentLoopConfig{
 		DoomLoopThreshold:   3,
@@ -62,18 +60,18 @@ func DefaultAgentLoopConfig() AgentLoopConfig {
 		CompactThreshold:    40,
 		CompactKeepLast:     10,
 		MaxParallelTools:    4,
-		RunTimeout:          10 * time.Minute,
 		ToolTimeout:         30 * time.Second,
 		ContextMaxTokens:    128000,
 		ContextWarnRatio:    0.7,
 		ContextHardRatio:    0.85,
 		LoopWindowSize:      10,
 		LoopDetectThreshold: 5,
+		LoopNameThreshold:   8,
 	}
 }
 
 // LLMClient is the interface the agent loop uses to communicate with language models.
-// It decouples the loop from gRPC/Sideload/direct HTTP transport.
+// It decouples the loop from specific LLM provider implementations.
 type LLMClient interface {
 	// Generate sends a prompt with tool definitions and history, returning a full response.
 	Generate(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
@@ -238,6 +236,8 @@ func (a *AgentLoop) SetHooks(hooks AgentHook) {
 	}
 }
 
+
+
 // SetMiddleware replaces the middleware pipeline for this agent loop.
 func (a *AgentLoop) SetMiddleware(mw *MiddlewarePipeline) {
 	if mw != nil {
@@ -256,9 +256,9 @@ type AgentResult struct {
 
 // Run executes the ReAct loop, emitting events to the provided channel.
 // The caller should read from eventCh until it's closed.
-// approveCh is optional (nil = no plan approval needed). When PlanMode is on,
-// the loop sends a plan_propose event and waits for true on approveCh to proceed.
-func (a *AgentLoop) Run(ctx context.Context, systemPrompt string, userMessage string, history []LLMMessage, approveCh <-chan bool) (*AgentResult, <-chan entity.AgentEvent) {
+// modelOverride, when non-empty, overrides the default model for this run
+// (used by TG /models command to switch models per-session).
+func (a *AgentLoop) Run(ctx context.Context, systemPrompt string, userMessage string, history []LLMMessage, modelOverride string) (*AgentResult, <-chan entity.AgentEvent) {
 	eventCh := make(chan entity.AgentEvent, 64)
 
 	result := &AgentResult{}
@@ -293,45 +293,11 @@ func (a *AgentLoop) Run(ctx context.Context, systemPrompt string, userMessage st
 				result.FinalContent = fmt.Sprintf("Internal error: %v", r)
 			}
 		}()
-		a.runLoop(ctx, systemPrompt, userMessage, history, result, eventCh, approveCh, sm)
+		a.runLoop(ctx, systemPrompt, userMessage, history, result, eventCh, sm, modelOverride)
 	}()
 
 	return result, eventCh
 }
-
-// planInstruction is injected into the user message when PlanMode is active.
-// Structures agent output into 4 phases: Understand → Plan → Execute → Verify.
-const planInstruction = `
-
----
-
-**Plan Mode 已激活。请严格遵循以下 4 阶段流程：**
-
-## Phase 1: 理解 (Understand)
-分析用户需求，阅读相关文件建立上下文。
-
-## Phase 2: 计划 (Plan)
-输出结构化方案：
-
-### 方案
-1. **目标**: [本次修改要达成的目标]
-2. **影响范围**: [需要修改/创建/删除的文件列表]
-3. **修改顺序**: [按依赖关系排序的执行步骤]
-4. **风险评估**: [可能的副作用或破坏性变更]
-5. **验证方式**: [完成后如何确认修改正确]
-
-**在用户批准前，不要调用任何工具。只输出方案。**
-
-## Phase 3: 执行 (Execute)
-方案批准后，按计划逐步执行。
-
-## Phase 4: 验证 (Verify)
-执行完毕后，自动运行验证：
-- 编译检查 (go build / npm run build)
-- lint 检查
-- 现有测试
-- 总结变更清单
-`
 
 func (a *AgentLoop) runLoop(
 	ctx context.Context,
@@ -340,8 +306,8 @@ func (a *AgentLoop) runLoop(
 	history []LLMMessage,
 	result *AgentResult,
 	eventCh chan<- entity.AgentEvent,
-	approveCh <-chan bool,
 	sm *StateMachine,
+	modelOverride string,
 ) {
 	// Store user message in context for MemoryMiddleware
 	ctx = WithUserMessage(ctx, userMessage)
@@ -352,47 +318,51 @@ func (a *AgentLoop) runLoop(
 		messages = append(messages, LLMMessage{Role: "system", Content: systemPrompt})
 	}
 	messages = append(messages, history...)
-
-	// Plan vs Act: inject plan instruction into user message on first turn
-	actualUserMsg := userMessage
-	if a.config.PlanMode {
-		actualUserMsg = userMessage + planInstruction
-	}
-	messages = append(messages, LLMMessage{Role: "user", Content: actualUserMsg})
+	messages = append(messages, LLMMessage{Role: "user", Content: userMessage})
 
 	toolDefs := a.tools.GetDefinitions()
 	toolsUsedSet := make(map[string]bool)
 
 	// Initialize guardrails for this run
-	loopDetector := NewLoopDetector(a.config.LoopWindowSize, a.config.LoopDetectThreshold, a.logger)
+	loopDetector := NewLoopDetector(a.config.LoopWindowSize, a.config.LoopDetectThreshold, a.config.LoopNameThreshold, a.logger)
 	contextGuard := NewContextGuard(a.config.ContextMaxTokens, a.config.ContextWarnRatio, a.config.ContextHardRatio, a.logger)
 	var costGuard *CostGuard
-	if a.config.MaxTokenBudget > 0 || a.config.RunTimeout > 0 {
-		costGuard = NewCostGuard(a.config.MaxTokenBudget, a.config.RunTimeout, a.logger)
+	if a.config.MaxTokenBudget > 0 {
+		costGuard = NewCostGuard(a.config.MaxTokenBudget, 0, a.logger)
 	}
 
-	// Apply RunTimeout to context
-	if a.config.RunTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, a.config.RunTimeout)
-		defer cancel()
+	// OpenClaw/Continue aligned: no RunTimeout. Token budget is the natural limit.
+
+
+	consecutiveFailures := 0    // Track consecutive tool failures for early abort
+	overflowCompactions := 0    // Track auto-compaction retries on context overflow (max 3)
+	compactionThisTurn := false // OpenClaw pattern: auto-continue once after compaction
+
+	// OpenClaw pattern: collect cleaned text from every assistant turn.
+	// Many models (MiniMax, Qwen3) emit ALL useful text during intermediate
+	// tool-calling steps and return empty content on the final step.
+	// This slice captures each non-empty assistant response so we can use
+	// the last one as a fallback when the final step's content is empty.
+	var assistantTexts []string
+
+	// Determine effective model for this run
+	model := a.config.Model
+	if modelOverride != "" {
+		model = modelOverride
+		a.logger.Info("Model override active", zap.String("override", modelOverride))
 	}
-
-	planApproved := !a.config.PlanMode // If not plan mode, consider it already approved
-
-	consecutiveFailures := 0 // Track consecutive tool failures for early abort
 
 	// Resolve per-model policy for this run
-	policy := ResolveModelPolicy(a.config.Model, a.config.ModelPolicies)
+	policy := ResolveModelPolicy(model, a.config.ModelPolicies)
 	a.logger.Info("Model policy resolved",
-		zap.String("model", a.config.Model),
+		zap.String("model", model),
 		zap.String("reasoning_format", policy.ReasoningFormat),
 		zap.Int("progress_interval", policy.ProgressInterval),
 		zap.String("prompt_style", policy.PromptStyle),
 	)
 
-	// No MaxSteps ceiling — loop runs until model stops calling tools.
-	// Safety nets: RunTimeout, LoopDetector, ContextGuard, consecutiveFailures.
+	// OpenClaw/Continue pattern: no MaxSteps, no RunTimeout.
+	// Loop runs until LLM stops calling tools. Safety nets: token budget, ContextGuard.
 	for step := 1; ; step++ {
 		sm.SetStep(step)
 
@@ -421,12 +391,14 @@ func (a *AgentLoop) runLoop(
 			}
 		}
 
-		// === Context compaction (token-based via ContextGuard) ===
+		// === Context compaction (token-based only — no fixed message count threshold) ===
+		// Aligned with OpenClaw/Gemini CLI: trigger ONLY on token ratio, never on message count.
 		ctxCheck := contextGuard.Check(messages)
-		if ctxCheck.NeedCompaction || len(messages) > a.config.CompactThreshold {
+		if ctxCheck.NeedCompaction {
 			_ = sm.Transition(StateCompacting)
 			messages = a.compactMessages(messages)
-			a.logger.Info("Context compacted",
+			compactionThisTurn = true
+			a.logger.Info("Context compacted (token threshold)",
 				zap.Int("messages_after", len(messages)),
 				zap.Int("estimated_tokens", ctxCheck.EstimatedTokens),
 				zap.Float64("ratio", ctxCheck.Ratio),
@@ -437,11 +409,7 @@ func (a *AgentLoop) runLoop(
 		messages = sanitizeMessages(messages)
 
 		// === 1. Call LLM with auto-retry ===
-		if !planApproved {
-			_ = sm.Transition(StatePlanning)
-		} else {
-			_ = sm.Transition(StateStreaming)
-		}
+		_ = sm.Transition(StateStreaming)
 
 		// === Middleware: BeforeModel (transform messages) ===
 		mwMessages := a.middleware.RunBeforeModel(ctx, messages, step)
@@ -449,7 +417,7 @@ func (a *AgentLoop) runLoop(
 		llmReq := &LLMRequest{
 			Messages:    mwMessages,
 			Tools:       toolDefs,
-			Model:       a.config.Model,
+			Model:       model,
 			Temperature: a.config.Temperature,
 		}
 
@@ -457,6 +425,24 @@ func (a *AgentLoop) runLoop(
 
 		resp, err := a.callLLMWithRetry(ctx, llmReq, step, eventCh)
 		if err != nil {
+			// OpenClaw pattern: reactive overflow detection.
+			// If the API returns a context overflow error, auto-compact and retry
+			// instead of failing immediately. Max 3 attempts.
+			if IsContextOverflowError(err) && overflowCompactions < 3 {
+				overflowCompactions++
+				a.logger.Warn("Context overflow detected, auto-compacting",
+					zap.Int("attempt", overflowCompactions),
+					zap.Int("messages", len(messages)),
+					zap.Error(err),
+				)
+				_ = sm.Transition(StateCompacting)
+				messages = a.compactMessages(messages)
+				a.logger.Info("Auto-compaction complete, retrying LLM call",
+					zap.Int("messages_after", len(messages)),
+				)
+				continue // retry the loop iteration with compacted context
+			}
+
 			// All retries exhausted
 			sm.RecordError()
 			_ = sm.Transition(StateError)
@@ -521,75 +507,53 @@ func (a *AgentLoop) runLoop(
 			zap.Int("step", step),
 			zap.Int("tool_calls", len(resp.ToolCalls)),
 			zap.Int("content_len", len(resp.Content)),
-			zap.Bool("plan_approved", planApproved),
 			zap.Int("tokens", resp.TokensUsed),
 		)
 		if len(resp.ToolCalls) == 0 {
-			// No tool calls
-			if !planApproved && resp.Content != "" {
-				// Plan mode: this is the plan proposal
-				a.hooks.OnPlanProposed(ctx, resp.Content)
-				a.emitEvent(eventCh, entity.AgentEvent{
-					Type:    entity.EventPlanPropose,
-					Content: resp.Content,
-				})
-
-				// Wait for approval
-				if approveCh != nil {
-					a.logger.Info("Plan proposed, waiting for approval")
-					select {
-					case approved := <-approveCh:
-						if !approved {
-							result.FinalContent = resp.Content
-							a.emitEvent(eventCh, entity.AgentEvent{
-								Type:    entity.EventTextDelta,
-								Content: "Plan rejected by user.",
-							})
-							a.emitEvent(eventCh, entity.AgentEvent{Type: entity.EventDone})
-							return
-						}
-					case <-ctx.Done():
-						a.emitEvent(eventCh, entity.AgentEvent{
-							Type:  entity.EventError,
-							Error: "context cancelled while waiting for plan approval",
-						})
-						return
-					}
-				}
-
-				planApproved = true
-				a.logger.Info("Plan approved, proceeding to execution")
-
-				// Add plan as assistant message, then inject "proceed + verify" user message
+			// OpenClaw/Continue pattern: auto-continue once after compaction.
+			// If compaction happened this turn, the LLM might stop prematurely because
+			// it lost context. Give it one more chance by injecting "continue".
+			if compactionThisTurn {
+				compactionThisTurn = false // only continue once, preventing infinite loop
+				a.logger.Info("Auto-continue after compaction (OpenClaw pattern)",
+					zap.Int("step", step),
+				)
 				messages = append(messages, LLMMessage{
 					Role:    "assistant",
 					Content: resp.Content,
 				})
 				messages = append(messages, LLMMessage{
 					Role:    "user",
-					Content: "方案已批准，请执行。完成后用文字告诉我结果。",
+					Content: "continue",
 				})
-				continue // Go back to LLM to execute the plan
+				continue // retry the loop — LLM gets fresh context after compaction
 			}
 
-			// Normal final response
-			// NOTE: text_delta events already emitted in real-time by streaming in callLLMWithRetry
+			// No tool calls — final response
 			a.logger.Info("[DIAG] Final response path",
 				zap.Int("step", step),
 				zap.Int("content_len", len(resp.Content)),
 			)
 
-			finalContent := resp.Content
+			finalContent := StripReasoningTags(resp.Content)
 
-			// Summary fallback: some models (Qwen3) return empty content on the final step
-			// because all text was emitted as intermediate narration during tool-calling steps.
-			// In this case, ask the LLM for a brief summary.
-			if finalContent == "" && step > 1 {
-				a.logger.Info("[DIAG] Final content empty after tool execution, requesting summary")
-				messages = append(messages, LLMMessage{
-					Role:    "assistant",
-					Content: resp.Content,
-				})
+			// Fallback 1: if final step content is empty after multi-step execution,
+			// request a proper summary from the model. This produces a coherent answer
+			// rather than reusing intermediate narration ("让我检查…") which is just
+			// the model's plan announcement, not a useful result.
+			if strings.TrimSpace(finalContent) == "" && step > 1 {
+				a.logger.Info("[DIAG] Final content empty, requesting summary")
+				// Ensure proper role alternation. The last message in history is a
+				// tool-result (role=tool) from the final tool call. We need to add
+				// a user message. Some APIs require assistant-then-user alternation,
+				// so insert a minimal assistant acknowledgment if the last message
+				// isn't already from the assistant.
+				if last := messages[len(messages)-1]; last.Role != "assistant" {
+					messages = append(messages, LLMMessage{
+						Role:    "assistant",
+						Content: "好的，已完成工具调用。",
+					})
+				}
 				messages = append(messages, LLMMessage{
 					Role:    "user",
 					Content: "请用简洁的文字总结你刚才执行的操作和最终结果。不要重复方案，只说结果。",
@@ -597,16 +561,27 @@ func (a *AgentLoop) runLoop(
 				summaryReq := &LLMRequest{
 					Messages:    messages,
 					Tools:       nil, // No tools — force text response
-					Model:       a.config.Model,
+					Model:       model,
 					Temperature: a.config.Temperature,
 				}
 				summaryResp, err := a.callLLMWithRetry(ctx, summaryReq, step+1, eventCh)
-				if err == nil && summaryResp.Content != "" {
-					finalContent = summaryResp.Content
+				if err == nil && strings.TrimSpace(summaryResp.Content) != "" {
+					finalContent = StripReasoningTags(summaryResp.Content)
 					a.logger.Info("[DIAG] Summary fallback succeeded",
 						zap.Int("content_len", len(finalContent)),
 					)
 				}
+			}
+
+			// Fallback 2: if summary also failed, use the last collected assistant text.
+			// This is better than returning nothing, even though intermediate narration
+			// is not ideal as a final answer.
+			if strings.TrimSpace(finalContent) == "" && len(assistantTexts) > 0 {
+				finalContent = assistantTexts[len(assistantTexts)-1]
+				a.logger.Info("[DIAG] Using last assistant text as final content (last resort)",
+					zap.Int("content_len", len(finalContent)),
+					zap.Int("total_assistant_texts", len(assistantTexts)),
+				)
 			}
 
 			result.FinalContent = finalContent
@@ -615,6 +590,13 @@ func (a *AgentLoop) runLoop(
 			a.emitEvent(eventCh, entity.AgentEvent{Type: entity.EventDone})
 			a.logger.Info("[DIAG] EventDone emitted, returning")
 			return
+		}
+
+		// OpenClaw pattern: collect intermediate assistant text during tool-calling steps.
+		// This captures useful narration that some models produce alongside tool calls,
+		// so we can use it as fallback if the final step returns empty content.
+		if cleaned := strings.TrimSpace(StripReasoningTags(resp.Content)); cleaned != "" {
+			assistantTexts = append(assistantTexts, cleaned)
 		}
 
 		// NOTE: intermediate text already streamed in real-time by callLLMWithRetry
@@ -629,30 +611,29 @@ func (a *AgentLoop) runLoop(
 		// 5. Execute tool calls (parallel when multiple)
 		_ = sm.Transition(StateToolExec)
 
-		// Pre-check: sliding window loop detection (skip SafeKind tools — read/search/think)
+		// Loop detection: inject reflection prompts instead of hard-terminating.
+		// OpenClaw/Continue philosophy: let the LLM self-correct.
+		var reflectionPrompts []string
 		for _, tc := range resp.ToolCalls {
 			kind := a.tools.GetToolKind(tc.Name)
 			if domaintool.SafeKinds[kind] {
 				continue // read-only tools don't count toward loop detection
 			}
-			// Build a deterministic args fingerprint so "bash(cmd1)" ≠ "bash(cmd2)"
+
+			// Name-only consecutive tracking (catches bash with different args)
+			if prompt := loopDetector.RecordName(tc.Name); prompt != "" {
+				reflectionPrompts = append(reflectionPrompts, prompt)
+			}
+
+			// Exact-match sliding window (catches identical repeated calls)
 			argsFingerprint := ""
 			if tc.Arguments != nil {
 				if raw, err := json.Marshal(tc.Arguments); err == nil {
 					argsFingerprint = string(raw)
 				}
 			}
-			if loopDetector.Record(tc.Name, argsFingerprint) {
-				a.logger.Warn("Loop detected by sliding window",
-					zap.String("tool", tc.Name),
-				)
-				_ = sm.Transition(StateError)
-				a.emitEvent(eventCh, entity.AgentEvent{
-					Type:  entity.EventError,
-					Error: fmt.Sprintf("Loop detected: tool '%s' called %d times with identical args in recent window", tc.Name, a.config.LoopDetectThreshold),
-				})
-				result.FinalContent = fmt.Sprintf("Stopped: loop detected on tool '%s'", tc.Name)
-				return
+			if prompt := loopDetector.Record(tc.Name, argsFingerprint); prompt != "" {
+				reflectionPrompts = append(reflectionPrompts, prompt)
 			}
 		}
 
@@ -842,13 +823,37 @@ func (a *AgentLoop) runLoop(
 			consecutiveFailures = 0
 		}
 
-		// If 3 consecutive rounds of all-failed tools, force report
+		// If 3 consecutive rounds of all-failed tools, inject reflection
 		if consecutiveFailures >= 3 {
 			messages = append(messages, LLMMessage{
 				Role:    "user",
 				Content: "[SYSTEM] 工具已连续失败 3 轮。请停止重试，用中文告诉用户：遇到了什么问题、尝试了什么、建议的解决方案。",
 			})
-			consecutiveFailures = 0 // Reset to allow one more attempt after reporting
+			consecutiveFailures = 0
+		}
+
+		// Inject loop detection reflection prompts (if any)
+		for _, prompt := range reflectionPrompts {
+			messages = append(messages, LLMMessage{
+				Role:    "user",
+				Content: prompt,
+			})
+		}
+
+		// === Post-tool context check (OpenClaw/Continue pattern) ===
+		// If tool outputs pushed us over the hard ratio, force compaction now.
+		postToolCheck := contextGuard.Check(messages)
+		if postToolCheck.NeedCompaction {
+			a.logger.Warn("Post-tool context overflow, forcing compaction",
+				zap.Int("estimated_tokens", postToolCheck.EstimatedTokens),
+				zap.Float64("ratio", postToolCheck.Ratio),
+			)
+			_ = sm.Transition(StateCompacting)
+			messages = a.compactMessages(messages)
+			compactionThisTurn = true
+			a.logger.Info("Post-tool compaction complete",
+				zap.Int("messages_after", len(messages)),
+			)
 		}
 
 		// Continue loop — go back to step 1 (call LLM again)

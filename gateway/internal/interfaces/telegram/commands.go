@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	toolpkg "github.com/ngoclaw/ngoclaw/gateway/internal/infrastructure/tool"
 )
 
 // Command Telegram 命令
@@ -85,6 +87,15 @@ type ApprovalManager interface {
 // HistoryClearer 对话历史清除接口 — 允许命令层清除 agent loop 的对话记忆
 type HistoryClearer interface {
 	ClearHistory(chatID int64)
+	// GetHistory returns the current conversation history for session-memory saving.
+	// Returns nil if no history exists.
+	GetHistory(chatID int64) []HistoryMessage
+}
+
+// HistoryMessage is a simplified message for the session-memory hook.
+type HistoryMessage struct {
+	Role    string // "user" | "assistant"
+	Content string
 }
 
 // AllowlistManager 白名单管理接口 (对标 OpenClaw commands-allowlist.ts)
@@ -167,7 +178,7 @@ type CommandRegistry struct {
 	subagentManager   SubagentManager
 	pluginManager     PluginManager
 	ttsController     TtsController
-	skillManager      *SkillManager
+	skillManager      *toolpkg.SkillManager
 	cronService       *CronService
 	historyClearer    HistoryClearer
 	mu                sync.RWMutex
@@ -259,7 +270,7 @@ func (r *CommandRegistry) SetTtsController(tc TtsController) {
 }
 
 // SetSkillManager sets the skill manager.
-func (r *CommandRegistry) SetSkillManager(sm *SkillManager) {
+func (r *CommandRegistry) SetSkillManager(sm *toolpkg.SkillManager) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.skillManager = sm

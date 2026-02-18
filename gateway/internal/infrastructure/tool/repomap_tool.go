@@ -29,9 +29,9 @@ func (t *RepoMapTool) Name() string        { return "repo_map" }
 func (t *RepoMapTool) Kind() domaintool.Kind { return domaintool.KindRead }
 
 func (t *RepoMapTool) Description() string {
-	return "Generate a structural map of a codebase showing functions, classes, interfaces, and method signatures. " +
-		"Use this to understand a project's architecture before editing code. " +
-		"For Go files it uses full AST parsing; for Python/JS/TS it uses pattern matching."
+	return "Generate a structural map of a codebase. " +
+		"Shows functions, classes, interfaces, and method signatures. " +
+		"Use to understand architecture before editing. Go uses AST; Python/JS/TS use pattern matching."
 }
 
 func (t *RepoMapTool) Schema() map[string]interface{} {

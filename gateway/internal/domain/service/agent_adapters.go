@@ -11,9 +11,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// AIClientAdapter adapts the existing gRPC AIClient to the AgentLoop's LLMClient interface.
-// This allows the agent loop to work with the existing Python ai-service via gRPC,
-// and later can be swapped for a Go-native LLM client or Sideload proxy.
+// AIClientAdapter adapts any LLM calling function to the AgentLoop's LLMClient interface.
+// Used to bridge the ProcessMessageUseCase and other non-AgentLoop callers.
 type AIClientAdapter struct {
 	generateFn func(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
 	logger     *zap.Logger

@@ -80,7 +80,7 @@ func (t *TUI) RunMessage(ctx context.Context, systemPrompt, userMessage string, 
 	fmt.Printf("%s%s▶ You%s\n", bold, fgGreen, reset)
 	fmt.Printf("  %s\n\n", userMessage)
 
-	result, eventCh := t.agentLoop.Run(ctx, systemPrompt, userMessage, history, nil)
+	result, eventCh := t.agentLoop.Run(ctx, systemPrompt, userMessage, history, "")
 
 	// Render each event
 	for event := range eventCh {

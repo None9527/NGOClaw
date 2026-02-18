@@ -142,29 +142,79 @@ func (g *ContextGuard) estimateTokens(messages []LLMMessage) int {
 	return total
 }
 
-// LoopDetector uses a sliding window to detect repeated tool call patterns.
+// LoopDetector detects repeated tool call patterns using two strategies:
+//   1. Name-only: same tool name called consecutively (regardless of args)
+//   2. Exact match: same tool name + identical args in sliding window
+//
+// Neither strategy terminates the loop. Instead, they return reflection prompts
+// for injection into the conversation, letting the LLM self-correct.
+// This aligns with OpenClaw/Continue's LLM-driven termination philosophy.
 type LoopDetector struct {
 	recentCalls []string // stores "name|argsHash" signatures
 	windowSize  int
-	threshold   int
-	logger      *zap.Logger
+	threshold   int      // exact-match threshold (sliding window)
+
+	// Name-only sliding window tracking (separate from exact-match window)
+	nameThreshold int
+	nameHistory   []string // tool names only, for frequency counting
+
+	logger *zap.Logger
 }
 
-// NewLoopDetector creates a sliding window loop detector.
-func NewLoopDetector(windowSize, threshold int, logger *zap.Logger) *LoopDetector {
+// NewLoopDetector creates a loop detector with both name-only and exact-match detection.
+// nameThreshold: consecutive same-name calls before reflection (e.g. 8)
+// windowSize/threshold: sliding window for exact-match detection
+func NewLoopDetector(windowSize, threshold, nameThreshold int, logger *zap.Logger) *LoopDetector {
 	return &LoopDetector{
-		recentCalls: make([]string, 0, windowSize),
-		windowSize:  windowSize,
-		threshold:   threshold,
-		logger:      logger,
+		recentCalls:   make([]string, 0, windowSize),
+		windowSize:    windowSize,
+		threshold:     threshold,
+		nameThreshold: nameThreshold,
+		logger:        logger,
 	}
 }
 
-// Record adds a tool call and returns true if a loop is detected.
-// A loop means the same tool with the SAME arguments appears >= threshold
-// times consecutively in the recent window. Different arguments = different call.
-func (d *LoopDetector) Record(toolName string, args ...string) bool {
-	// Build signature: "toolName" or "toolName|argsHash" when args are provided
+// RecordName tracks tool name frequency in the sliding window (ignoring args).
+// Returns a non-empty reflection prompt when the same tool appears >= nameThreshold
+// times within the window — even if other tools are interleaved.
+// This catches patterns like: bash×7 → web_search → bash (not strictly consecutive).
+func (d *LoopDetector) RecordName(toolName string) string {
+	// recentCalls is already maintained by Record(), so we count tool name
+	// occurrences in the existing window. We also track via separate name window.
+	d.nameHistory = append(d.nameHistory, toolName)
+	if len(d.nameHistory) > d.windowSize {
+		d.nameHistory = d.nameHistory[1:]
+	}
+
+	// Count how many times this tool name appears in the window
+	count := 0
+	for _, name := range d.nameHistory {
+		if name == toolName {
+			count++
+		}
+	}
+
+	if count >= d.nameThreshold {
+		d.logger.Warn("Same tool dominates sliding window",
+			zap.String("tool", toolName),
+			zap.Int("count_in_window", count),
+			zap.Int("window_size", len(d.nameHistory)),
+			zap.Int("threshold", d.nameThreshold),
+		)
+		return fmt.Sprintf(
+			"[SYSTEM] ⚠️ 严重警告：工具 %s 在最近 %d 次调用中出现了 %d 次。"+
+				"你很可能陷入了重试循环。你必须立即停止调用工具，"+
+				"直接用中文回复用户：(1) 你在尝试做什么 (2) 遇到了什么困难 (3) 建议用户如何解决。"+
+				"不要再调用任何工具。",
+			toolName, len(d.nameHistory), count,
+		)
+	}
+	return ""
+}
+
+// Record adds a tool call to the sliding window and returns a non-empty reflection
+// prompt if the EXACT same call (name + args) appears >= threshold times consecutively.
+func (d *LoopDetector) Record(toolName string, args ...string) string {
 	sig := toolName
 	if len(args) > 0 && args[0] != "" {
 		sig = toolName + "|" + args[0]
@@ -176,10 +226,9 @@ func (d *LoopDetector) Record(toolName string, args ...string) bool {
 	}
 
 	if len(d.recentCalls) < d.threshold {
-		return false
+		return ""
 	}
 
-	// Check if the last `threshold` calls are all the same signature
 	tail := d.recentCalls[len(d.recentCalls)-d.threshold:]
 	allSame := true
 	for _, name := range tail {
@@ -190,17 +239,22 @@ func (d *LoopDetector) Record(toolName string, args ...string) bool {
 	}
 
 	if allSame {
-		d.logger.Warn("Tool call loop detected",
+		d.logger.Warn("Exact tool call loop detected",
 			zap.String("tool", toolName),
 			zap.String("signature", sig),
 			zap.Int("consecutive_calls", d.threshold),
 		)
-		return true
+		return fmt.Sprintf(
+			"[SYSTEM] 工具 %s 以完全相同的参数被调用了 %d 次，结果不会改变。"+
+				"请停止重复调用，改用其他方法或直接告知用户结果。",
+			toolName, d.threshold,
+		)
 	}
-	return false
+	return ""
 }
 
-// Reset clears the sliding window (call at start of each Run).
+// Reset clears all tracking state (call at start of each Run).
 func (d *LoopDetector) Reset() {
 	d.recentCalls = d.recentCalls[:0]
+	d.nameHistory = d.nameHistory[:0]
 }

@@ -38,14 +38,13 @@ func TestHookChain_CallsAllHooks(t *testing.T) {
 	chain.AfterLLMCall(ctx, &LLMResponse{}, 1)
 	chain.BeforeToolCall(ctx, "shell_exec", nil)
 	chain.AfterToolCall(ctx, "shell_exec", "ok", true)
-	chain.OnPlanProposed(ctx, "plan text")
 	chain.OnError(ctx, errors.New("test error"), 2)
 	chain.OnComplete(ctx, &AgentResult{FinalContent: "done"})
 	chain.OnStateChange(StateIdle, StateStreaming, StateSnapshot{})
 
-	// Each of 8 methods should be called for each hook = 16 calls
-	if len(calls) != 16 {
-		t.Errorf("expected 16 hook calls, got %d: %v", len(calls), calls)
+	// Each of 7 methods should be called for each hook = 14 calls
+	if len(calls) != 14 {
+		t.Errorf("expected 14 hook calls, got %d: %v", len(calls), calls)
 	}
 }
 
@@ -136,7 +135,7 @@ func TestHookChain_EmptyChain(t *testing.T) {
 	chain.AfterLLMCall(ctx, &LLMResponse{}, 0)
 	result := chain.BeforeToolCall(ctx, "test", nil)
 	chain.AfterToolCall(ctx, "test", "", true)
-	chain.OnPlanProposed(ctx, "")
+
 	chain.OnError(ctx, nil, 0)
 	chain.OnComplete(ctx, nil)
 	chain.OnStateChange(StateIdle, StateStreaming, StateSnapshot{})
@@ -168,9 +167,7 @@ func (h *trackingHook) BeforeToolCall(_ context.Context, _ string, _ map[string]
 func (h *trackingHook) AfterToolCall(_ context.Context, _ string, _ string, _ bool) {
 	*h.calls = append(*h.calls, h.id+":AfterToolCall")
 }
-func (h *trackingHook) OnPlanProposed(_ context.Context, _ string) {
-	*h.calls = append(*h.calls, h.id+":OnPlanProposed")
-}
+
 func (h *trackingHook) OnError(_ context.Context, _ error, _ int) {
 	*h.calls = append(*h.calls, h.id+":OnError")
 }

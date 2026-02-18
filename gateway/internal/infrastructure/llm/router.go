@@ -11,7 +11,7 @@ import (
 )
 
 // Router implements service.LLMClient by routing to the best available provider.
-// Strategy: Sideload module first (primary) → Go builtin fallback.
+// Strategy: providers are tried in priority order with automatic failover.
 // Features: per-provider latency tracking, circuit breaker, failover.
 type Router struct {
 	providers []Provider
@@ -41,7 +41,7 @@ func NewRouter(logger *zap.Logger) *Router {
 var _ service.LLMClient = (*Router)(nil)
 
 // AddProvider adds a provider to the router.
-// Providers are tried in insertion order (add sideload first, then fallback).
+// Providers are tried in insertion order (higher priority first, then fallback).
 func (r *Router) AddProvider(p Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
