@@ -83,63 +83,113 @@ func Bootstrap(logger *zap.Logger) error {
 // Embedded default file contents
 // ──────────────────────────────────────────────────────────────
 
-const defaultConfig = `# NGO-Claw Gateway Configuration
+const defaultConfig = `# ═══════════════════════════════════════════════════════════════
+# NGOClaw Configuration / NGOClaw 配置文件
+# Auto-generated on first launch — feel free to edit
 # 首次启动自动生成 — 可自由编辑
+# Docs: https://github.com/None9527/NGOClaw/blob/main/docs/USER_MANUAL.md
+# ═══════════════════════════════════════════════════════════════
 
+# ─── Gateway Server / 网关服务 ────────────────────────────────
+# HTTP API server settings.
+# HTTP API 服务监听地址。
 gateway:
   host: 0.0.0.0
   port: 18790
-  mode: local
+  mode: local                  # local | production
 
+# ─── Telegram Bot / Telegram 机器人 ──────────────────────────
+# Leave bot_token empty to disable Telegram interface.
+# bot_token 为空则不启用 Telegram 接口。
 telegram:
-  bot_token: ""
-  allow_ids: []
-  mode: polling
-  dm_policy: allowlist
-  group_policy: allowlist
+  bot_token: ""                # Get from @BotFather / 从 @BotFather 获取
+  allow_ids: []                # Allowed user IDs / 允许的用户 ID 列表
+  mode: polling                # polling | webhook
+  dm_policy: allowlist         # allowlist | open
+  group_policy: allowlist      # allowlist | open
 
+# ─── Database / 数据库 ───────────────────────────────────────
+# Conversation history storage.
+# 会话历史存储。
 database:
-  type: sqlite
-  dsn: ngoclaw.db
+  type: sqlite                 # sqlite | postgres
+  dsn: ngoclaw.db              # File path (sqlite) or connection string (postgres)
 
+# ─── Logging / 日志 ──────────────────────────────────────────
 log:
-  level: info
-  format: console
+  level: info                  # debug | info | warn | error
+  format: console              # console | json
 
+# ─── Agent Core / Agent 核心 ─────────────────────────────────
+# Main agent behavior settings.
+# Agent 主要行为配置。
 agent:
-  default_model: ""
-  workspace: ""
-  max_iterations: 50
+  default_model: ""            # e.g. "openai/gpt-4o" / 格式: "provider/model"
+  workspace: ""                # Default workspace dir / 默认工作目录 (空=当前目录)
+  max_iterations: 50           # Max ReAct loop steps / 最大循环步数
 
+  # ─── LLM Providers / LLM 服务商 ──────────────────────────
+  # Add one or more providers. Lower priority = preferred.
+  # 添加一个或多个 Provider。priority 越小越优先。
+  # Supports: OpenAI, Anthropic, Google, Bailian, MiniMax, etc.
   providers: []
+  # Example / 示例:
+  # providers:
+  #   - name: openai
+  #     base_url: "https://api.openai.com/v1"
+  #     api_key: "sk-..."
+  #     models:
+  #       - "openai/gpt-4o"
+  #       - "openai/gpt-4o-mini"
+  #     priority: 1
+  #
+  #   - name: anthropic
+  #     base_url: "https://api.anthropic.com/v1"
+  #     api_key: "sk-ant-..."
+  #     api_type: "anthropic"
+  #     models:
+  #       - "anthropic/claude-sonnet-4-20250514"
+  #     priority: 2
 
+  # ─── Runtime Limits / 运行时限制 ──────────────────────────
+  # Timeout and resource constraints for tool execution.
+  # 工具执行的超时和资源约束。
   runtime:
-    tool_timeout: 60s
-    run_timeout: 10m
-    sub_agent_timeout: 3m
-    sub_agent_max_steps: 25
-    max_token_budget: 180000
-    concurrent_tools: true
-    max_retries: 3
-    retry_base_wait: 2s
+    tool_timeout: 60s          # Single tool timeout / 单次工具超时
+    run_timeout: 10m           # Total agent run timeout / 总运行超时
+    sub_agent_timeout: 3m      # Sub-agent timeout / 子 Agent 超时
+    sub_agent_max_steps: 25    # Sub-agent max steps / 子 Agent 最大步数
+    max_token_budget: 180000   # Token budget per run / 单次 Token 预算
+    concurrent_tools: true     # Allow parallel tool calls / 允许并行工具调用
+    max_retries: 3             # Auto-retry on failure / 失败自动重试次数
+    retry_base_wait: 2s        # Retry backoff base / 重试等待基数
 
+  # ─── Guardrails / 安全护栏 ────────────────────────────────
+  # Context window management and loop detection.
+  # 上下文窗口管理和循环检测。
   guardrails:
-    context_max_tokens: 180000
-    context_warn_ratio: 0.7
-    context_hard_ratio: 0.85
-    loop_detect_threshold: 5
+    context_max_tokens: 180000 # Max context window / 最大上下文窗口
+    context_warn_ratio: 0.7    # Warn at 70% usage / 70% 时警告
+    context_hard_ratio: 0.85   # Force compaction at 85% / 85% 时强制压缩
+    loop_detect_threshold: 5   # Identical calls threshold / 相同调用阈值
 
+  # ─── Context Compaction / 上下文压缩 ──────────────────────
+  # Automatic conversation summarization when context grows large.
+  # 上下文过大时自动摘要压缩。
   compaction:
-    message_threshold: 30
-    keep_recent: 10
-    summary_max_tokens: 1000
+    message_threshold: 30      # Trigger after N messages / N 条消息后触发
+    keep_recent: 10            # Keep last N messages / 保留最近 N 条
+    summary_max_tokens: 1000   # Summary budget / 摘要 Token 上限
 
+# ─── Long-term Memory / 长期记忆 ─────────────────────────────
+# Vector-based memory for cross-conversation recall.
+# 基于向量的跨会话记忆（需要 Ollama 提供嵌入服务）。
 memory:
-  enabled: false
-  ollama_url: ""
-  embed_model: ""
+  enabled: false               # Enable memory system / 启用记忆系统
+  ollama_url: ""               # Ollama API URL / Ollama 服务地址
+  embed_model: ""              # Embedding model name / 嵌入模型名
   store_path: "~/.ngoclaw/memory/lancedb"
-  store_type: "lancedb"
+  store_type: "lancedb"        # lancedb (default)
 `
 
 const defaultSoul = `You are NGO-Claw, an autonomous AI agent with deep expertise across software engineering, data analysis, research, and general problem-solving.
